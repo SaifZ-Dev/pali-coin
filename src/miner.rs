@@ -153,7 +153,7 @@ async fn mine_block(client: &mut NetworkClient, miner_address: &str) -> Result<(
         
         // Avoid CPU hogging
         if hashes % 1000 == 0 {
-            sleep(Duration::from_millis(1)).await;
+            sleep(Duration::from_millis(5)).await;
         }
     }
     

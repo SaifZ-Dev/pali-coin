@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pali Coin - Blockchain Cryptocurrency</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css">
+    <style>
+        body {
+            padding-top: 20px;
+            background-color: #f5f5f5;
+        }
+        .jumbotron {
+            padding: 2rem;
+            background-color: #e9ecef;
+            border-radius: 0.3rem;
+            margin-bottom: 2rem;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <nav class="navbar navbar-expand-lg navbar-light bg-light mb-4">
+            <div class="container-fluid">
+                <a class="navbar-brand" href="/">Pali Coin</a>
+                <div class="collapse navbar-collapse">
+                    <ul class="navbar-nav">
+                        <li class="nav-item">
+                            <a class="nav-link active" href="/">Home</a>
+                        </li>
+                        <li class="nav-item">
+                            <a class="nav-link" href="/wallet">Wallet</a>
+                        </li>
+                    </ul>
+                </div>
+            </div>
+        </nav>
+
+        <div class="jumbotron">
+            <h1 class="display-4">Welcome to Pali Coin</h1>
+            <p class="lead">A secure, efficient blockchain cryptocurrency built with Rust.</p>
+            <hr class="my-4">
+            <p>Use our wallet to send and receive Pali Coins or explore the blockchain.</p>
+            <a class="btn btn-primary btn-lg" href="/wallet" role="button">Open Wallet</a>
+        </div>
+
+        <div class="row">
+            <div class="col-md-6">
+                <div class="card mb-4">
+                    <div class="card-header">
+                        Blockchain Status
+                    </div>
+                    <div class="card-body">
+                        <div id="blockchain-info">
+                            <p>Loading blockchain info...</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-6">
+                <div class="card mb-4">
+                    <div class="card-header">
+                        Getting Started
+                    </div>
+                    <div class="card-body">
+                        <ol>
+                            <li>Create a wallet to receive Pali Coins</li>
+                            <li>Mine Pali Coins to earn rewards</li>
+                            <li>Send Pali Coins to other addresses</li>
+                        </ol>
+                        <a href="/wallet" class="btn btn-primary">Go to Wallet</a>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <footer class="mt-4 text-center text-muted">
+            <p>Pali Coin &copy; 2025 - <a href="https://github.com/SaifZ-Dev/pali-coin" target="_blank">GitHub</a></p>
+        </footer>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        // Fetch blockchain info
+        fetch('/api/info')
+            .then(response => response.json())
+            .then(data => {
+                const infoDiv = document.getElementById('blockchain-info');
+                if (data.error) {
+                    infoDiv.innerHTML = `<p class="text-danger">Error: ${data.error}</p>`;
+                } else {
+                    infoDiv.innerHTML = `
+                        <p><strong>Block Height:</strong> ${data.height}</p>
+                        <p><strong>Status:</strong> ${data.status}</p>
+                    `;
+                }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                const infoDiv = document.getElementById('blockchain-info');
+                infoDiv.innerHTML = `<p class="text-danger">Error connecting to blockchain</p>`;
+            });
+    </script>
+</body>
+</html>

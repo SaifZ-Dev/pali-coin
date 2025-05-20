@@ -9,8 +9,9 @@ use serde::{Serialize, Deserialize};
 use chrono::Utc;
 use sha2::{Sha256, Digest};
 
-const GENESIS_BLOCK_REWARD: u64 = 50;
-const MINING_REWARD: u64 = 50;
+// Reduced rewards and constants
+const GENESIS_BLOCK_REWARD: u64 = 5;  // Reduced from 50 to 5
+const MINING_REWARD: u64 = 5;  // Reduced from 50 to 5
 const MAX_TRANSACTIONS_PER_BLOCK: usize = 1000;
 const UTXO_PREFIX: &[u8] = b"utxo-";
 const BLOCK_PREFIX: &[u8] = b"block-";
@@ -87,7 +88,7 @@ impl Blockchain {
         chain.last().cloned()
     }
     
-    // New method to create a block template with mining reward to specific address
+    // Create a block template with mining reward to specific address
     pub fn create_block_template(&self, miner_address_str: &str) -> Block {
         // Convert miner address from hex string to bytes
         let mut miner_address = [0u8; 20];
@@ -101,7 +102,7 @@ impl Blockchain {
         let coinbase_tx = Transaction {
             from: [0u8; 20], // From the system (all zeros)
             to: miner_address,
-            amount: MINING_REWARD,
+            amount: MINING_REWARD, // Using reduced mining reward
             fee: 0,
             nonce: 0,
             signature: Vec::new(), // No signature needed for coinbase
@@ -117,7 +118,7 @@ impl Blockchain {
                     timestamp: Utc::now().timestamp() as u64,
                     height: latest.header.height + 1,
                     nonce: 0,
-                    difficulty: latest.header.difficulty,
+                    difficulty: latest.header.difficulty, // Use the current difficulty
                 },
                 transactions: vec![coinbase_tx], // Start with just the coinbase
                 zk_proof: Some(Vec::new()),
@@ -131,7 +132,7 @@ impl Blockchain {
                     timestamp: Utc::now().timestamp() as u64,
                     height: 0,
                     nonce: 0,
-                    difficulty: 1,
+                    difficulty: 20, // Higher initial difficulty
                 },
                 transactions: vec![coinbase_tx],
                 zk_proof: Some(Vec::new()),
@@ -143,12 +144,12 @@ impl Blockchain {
         // Create a simple genesis block with a reward to a placeholder address
         let timestamp = Utc::now().timestamp() as u64;
         
-        // Create a miner reward transaction - using all zeros address for genesis
+        // Create a miner reward transaction
         let miner_address = [0u8; 20]; // Genesis block reward goes to address 0
         let genesis_transaction = Transaction {
             from: [0u8; 20], // From the system (all zeros)
             to: miner_address,
-            amount: GENESIS_BLOCK_REWARD,
+            amount: GENESIS_BLOCK_REWARD, // Reduced reward
             fee: 0,
             nonce: 0,
             signature: Vec::new(), // No signature needed for coinbase
@@ -157,13 +158,12 @@ impl Blockchain {
         // Use the correct structure for your BlockHeader
         let mut genesis_block = Block {
             header: crate::types::BlockHeader {
-                // Exclude the version field if it doesn't exist in your BlockHeader
                 prev_hash: [0; 32], // All zeros for genesis block
                 merkle_root: [0; 32], // Will be calculated
                 timestamp,
                 height: 0,
                 nonce: 0,
-                difficulty: 1, // Start with minimal difficulty
+                difficulty: 20, // Higher initial difficulty
             },
             transactions: vec![genesis_transaction],
             zk_proof: Some(Vec::new()), // Using Option<Vec<u8>> based on the error message
@@ -188,7 +188,7 @@ impl Blockchain {
             let metadata = BlockchainMetadata {
                 chain_height: 0,
                 latest_block_hash: genesis_block.hash(),
-                difficulty: 1,
+                difficulty: 20, // Higher initial difficulty
             };
             let metadata_data = serde_json::to_vec(&metadata)?;
             db.put(METADATA_KEY, metadata_data)?;
@@ -204,6 +204,31 @@ impl Blockchain {
         
         // Calculate the merkle root
         block.header.merkle_root = self.calculate_merkle_root(&block.transactions);
+        
+        // Adjust difficulty every 10 blocks
+        if block.header.height % 10 == 0 && block.header.height > 0 {
+            let chain = self.chain.read().unwrap();
+            if chain.len() >= 10 {
+                // Get the timestamps of the last 10 blocks
+                let start_time = chain[chain.len() - 10].header.timestamp;
+                let end_time = block.header.timestamp;
+                
+                // Target time for 10 blocks (10 minutes per block)
+                let target_time_seconds = 10 * 10 * 60; // 10 blocks * 10 minutes * 60 seconds
+                let actual_time_seconds = end_time.saturating_sub(start_time) as i64;
+                
+                // Adjust difficulty based on how quickly blocks were mined
+                if actual_time_seconds < target_time_seconds / 2 {
+                    // Too fast - increase difficulty
+                    block.header.difficulty = block.header.difficulty.saturating_add(1);
+                    info!("Mining difficulty increased to {}", block.header.difficulty);
+                } else if actual_time_seconds > target_time_seconds * 2 {
+                    // Too slow - decrease difficulty (but never below initial difficulty)
+                    block.header.difficulty = block.header.difficulty.saturating_sub(1).max(20);
+                    info!("Mining difficulty decreased to {}", block.header.difficulty);
+                }
+            }
+        }
         
         // Add the block to our chain
         {
@@ -261,7 +286,10 @@ impl Blockchain {
                              block.transactions.len(), MAX_TRANSACTIONS_PER_BLOCK).into());
         }
 
-        // TODO: Check difficulty and proof-of-work/proof-of-stake
+        // Check that the block meets the difficulty requirement
+        if !block.is_valid_proof_of_work() {
+            return Err("Block does not meet proof-of-work requirement".into());
+        }
 
         // Validate each transaction
         let is_mining_block = block.transactions.len() > 0 && 
