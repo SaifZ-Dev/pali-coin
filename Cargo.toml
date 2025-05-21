@@ -4,12 +4,16 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+k256 = { version = "0.13.1", features = ["ecdh"] }
+hkdf = "0.12.0"
+zeroize = { version = "1.6.0", features = ["zeroize_derive"] }
+secp256k1-sys = "0.8.1"
 secp256k1 = { version = "0.28.0", features = ["rand"] }
 serde_with = { version = "3.12.0", features = ["hex"] }
+bip32 = "0.5"
 argon2 = "0.5.0"
 chacha20poly1305 = "0.10.1"
 rand = "0.8.5"
-zeroize = "1.6.0"
 warp = "0.3"
 handlebars = "4.3"
 sha2 = "0.10"
@@ -31,8 +35,9 @@ log = "0.4"
 env_logger = "0.10"
 clap = "4.4.12"
 bip39 = "2.0.0"
-hmac = "0.12.1"
+hmac = { version = "0.12.1", features = ["std"] }
 pbkdf2 = "0.12.2"
+ripemd = "0.1.3"
 
 [[bin]]
 name = "pali-node"

@@ -16,10 +16,11 @@ fn test_transaction_signing() {
         100, // amount
         1,   // fee
         1,   // nonce
-    );
+        1    
+);
     
     // Sign the transaction
-    tx.sign(&sender_wallet).expect("Failed to sign transaction");
+sender_wallet.sign_transaction(&mut tx).expect("Failed to sign transaction");
     
     // Verify the signature
     assert!(!tx.signature.is_empty(), "Transaction signature should not be empty");
@@ -31,9 +32,10 @@ fn test_transaction_signing() {
         100,
         1,
         1,
+        1,
     );
     
     // This should fail because we're using the wrong wallet to sign
-    let result = invalid_tx.sign(&sender_wallet);
+    let result = sender_wallet.sign_transaction(&mut invalid_tx);
     assert!(result.is_err(), "Should fail when signing with wrong wallet");
 }

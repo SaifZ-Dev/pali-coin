@@ -169,6 +169,7 @@ fn main() {
                         amount,
                         1, // fee
                         pali_coin::wallet::generate_nonce(), // use random nonce
+                        1,
                     );
                     
                     // Sign the transaction

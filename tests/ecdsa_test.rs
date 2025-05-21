@@ -13,13 +13,23 @@ fn test_ecdsa_signature() {
         100,       // Amount
         1,         // Fee
         1,         // Nonce
-    );
+        1,    
+);
     
     // Sign the transaction
     wallet.sign_transaction(&mut tx).unwrap();
     
     // The signature should not be empty
     assert!(!tx.signature.is_empty());
+    assert!(!tx.public_key.is_empty());
+    
+    // Verify the transaction
+    assert!(tx.verify(), "Transaction verification failed");
+    
+    // Modify the transaction - verification should fail
+    let original_amount = tx.amount;
+    tx.amount += 1;
+    assert!(!tx.verify(), "Modified transaction should fail verification");
     
     // Create some data
     let data = b"Test data for signing";
