@@ -4,11 +4,16 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+secp256k1 = { version = "0.28.0", features = ["rand"] }
+serde_with = { version = "3.12.0", features = ["hex"] }
+argon2 = "0.5.0"
+chacha20poly1305 = "0.10.1"
+rand = "0.8.5"
+zeroize = "1.6.0"
 warp = "0.3"
 handlebars = "4.3"
 sha2 = "0.10"
 ed25519-dalek = "2.0"
-rand = "0.8"
 bellman = { version = "0.14", features = ["groth16"] }
 bls12_381 = { version = "0.8" }
 ff = "0.13"
@@ -20,12 +25,14 @@ bincode = "1.3"
 tokio = { version = "1.0", features = ["full"] }
 reqwest = { version = "0.11", features = ["json"] }
 rocksdb = "0.21"
-clap = { version = "4.0", features = ["derive"] }
 chrono = { version = "0.4", features = ["serde"] }
 hex = "0.4"
 log = "0.4"
 env_logger = "0.10"
-secp256k1 = "0.27.0"
+clap = "4.4.12"
+bip39 = "2.0.0"
+hmac = "0.12.1"
+pbkdf2 = "0.12.2"
 
 [[bin]]
 name = "pali-node"
@@ -36,9 +43,13 @@ name = "pali-miner"
 path = "src/miner.rs"
 
 [[bin]]
-name = "pali-wallet"
-path = "src/wallet.rs"
-
-[[bin]]
 name = "pali-web"
 path = "src/bin/pali-web.rs"
+
+[[bin]]
+name = "pali-wallet"
+path = "src/bin/pali-wallet/main.rs"
+
+[lib]
+name = "pali_coin"
+path = "src/lib.rs"

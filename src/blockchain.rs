@@ -315,37 +315,38 @@ impl Blockchain {
         Ok(())
     }
 
-    fn validate_transaction(&self, tx: &Transaction) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        // Skip validation for mining rewards
-        if tx.from == [0u8; 20] {
-            return Ok(());
-        }
-
-        // Verify transaction signature (simplified)
-        self.verify_signature(tx)?;
-
-        // Check that sender has enough funds
-        let sender_address = hex::encode(tx.from);
-        let required_amount = tx.amount + tx.fee;
-        
-        let utxo_set = self.utxo_set.read().unwrap();
-        let sender_utxos = utxo_set.get(&sender_address);
-        
-        if sender_utxos.is_none() {
-            return Err(format!("Sender {} has no UTXOs", sender_address).into());
-        }
-        
-        let sender_balance: u64 = sender_utxos.unwrap().iter()
-            .map(|(_, amount)| amount)
-            .sum();
-        
-        if sender_balance < required_amount {
-            return Err(format!("Insufficient funds: {} < {}", sender_balance, required_amount).into());
-        }
-
-        Ok(())
+fn validate_transaction(&self, tx: &Transaction) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // Skip validation for mining rewards
+    if tx.from == [0u8; 20] {
+        return Ok(());
     }
 
+    // Verify transaction signature
+    if !tx.verify() {
+        return Err("Invalid transaction signature".into());
+    }
+
+    // Check that sender has enough funds
+    let sender_address = hex::encode(tx.from);
+    let required_amount = tx.amount + tx.fee;
+    
+    let utxo_set = self.utxo_set.read().unwrap();
+    let sender_utxos = utxo_set.get(&sender_address);
+    
+    if sender_utxos.is_none() {
+        return Err(format!("Sender {} has no UTXOs", sender_address).into());
+    }
+    
+    let sender_balance: u64 = sender_utxos.unwrap().iter()
+        .map(|(_, amount)| amount)
+        .sum();
+    
+    if sender_balance < required_amount {
+        return Err(format!("Insufficient funds: {} < {}", sender_balance, required_amount).into());
+    }
+
+    Ok(())
+}
     fn verify_signature(&self, tx: &Transaction) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // Simplified signature verification
         // In a real implementation, we'd use the UTXO model properly

@@ -33,7 +33,7 @@
         <h1 class="mb-4">Pali Coin Wallet</h1>
 
         <div class="row">
-            <!-- Send Transaction Form - NEW SECTION -->
+            <!-- Send Transaction Form -->
             <div class="col-md-6">
                 <div class="card mb-4">
                     <div class="card-header">
@@ -44,6 +44,11 @@
                             <label for="from-wallet" class="form-label">From Wallet File</label>
                             <input type="text" class="form-control" id="from-wallet" value="wallet.json" placeholder="Path to your wallet file">
                             <div class="form-text">Default is wallet.json</div>
+                        </div>
+                        <div class="mb-3">
+                            <label for="wallet-password" class="form-label">Wallet Password</label>
+                            <input type="password" class="form-control" id="wallet-password" placeholder="Enter wallet password (if encrypted)">
+                            <div class="form-text">Leave empty for unencrypted wallets</div>
                         </div>
                         <div class="mb-3">
                             <label for="to-address" class="form-label">To Address</label>
@@ -64,7 +69,7 @@
                 </div>
             </div>
 
-            <!-- Check Balance Section -->
+<!-- Check Balance Section -->
             <div class="col-md-6">
                 <div class="card mb-4">
                     <div class="card-header">
@@ -83,7 +88,8 @@
         </div>
 
         <div class="row">
-            <!-- Transaction History Section -->
+       
+     <!-- Transaction History Section -->
             <div class="col-md-12">
                 <div class="card mb-4">
                     <div class="card-header">
@@ -177,12 +183,13 @@
                 });
         });
 
-        // Send Transaction Button Handler - NEW CODE
+        // Send Transaction Button Handler
         document.getElementById('send-tx-btn').addEventListener('click', function() {
             const fromWallet = document.getElementById('from-wallet').value.trim();
             const toAddress = document.getElementById('to-address').value.trim();
             const amount = document.getElementById('amount').value.trim();
             const fee = document.getElementById('fee').value.trim();
+            const password = document.getElementById('wallet-password').value.trim();
 
             if (!fromWallet || !toAddress || !amount) {
                 document.getElementById('tx-result').innerHTML = '<div class="alert alert-danger">Please fill all required fields</div>';
@@ -200,7 +207,8 @@
                     from_wallet: fromWallet,
                     to_address: toAddress,
                     amount: amount,
-                    fee: fee || '1'
+                    fee: fee || '1',
+                    password: password || null
                 }),
             })
             .then(response => response.json())

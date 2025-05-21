@@ -1,0 +1,295 @@
+use serde::{Serialize, Deserialize};
+use sha2::{Sha256, Digest};
+use rand::rngs::OsRng;
+use rand::RngCore;
+use std::fs;
+use std::error::Error;
+use log::warn;
+use argon2::{Argon2, password_hash::SaltString};
+use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
+use chacha20poly1305::aead::Aead;
+use chacha20poly1305::KeyInit; // Add this missing import
+use rand::Rng;
+use zeroize::Zeroize;
+
+// Define a structure for the encrypted wallet
+#[derive(Serialize, Deserialize)]
+struct EncryptedWallet {
+    salt: String,
+    nonce: String,
+    encrypted_data: String,
+}
+
+// Custom serialization for byte arrays
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Wallet {
+    #[serde(with = "hex_array_32")]
+    pub private_key: [u8; 32],
+    #[serde(with = "hex_array_33")]
+    pub public_key: [u8; 33],
+    #[serde(with = "hex_array_20")]
+    pub address: [u8; 20],
+}
+
+// Custom serialization modules for different size byte arrays
+mod hex_array_32 {
+    use serde::{Deserialize, Deserializer, Serializer};
+    use serde::de::Error;
+
+    pub fn serialize<S>(bytes: &[u8; 32], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&hex::encode(bytes))
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<[u8; 32], D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        let bytes = hex::decode(&s).map_err(Error::custom)?;
+        if bytes.len() != 32 {
+            return Err(Error::custom(format!("Expected 32 bytes, got {}", bytes.len())));
+        }
+        let mut array = [0u8; 32];
+        array.copy_from_slice(&bytes);
+        Ok(array)
+    }
+}
+
+mod hex_array_33 {
+    use serde::{Deserialize, Deserializer, Serializer};
+    use serde::de::Error;
+
+    pub fn serialize<S>(bytes: &[u8; 33], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&hex::encode(bytes))
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<[u8; 33], D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        let bytes = hex::decode(&s).map_err(Error::custom)?;
+        if bytes.len() != 33 {
+            return Err(Error::custom(format!("Expected 33 bytes, got {}", bytes.len())));
+        }
+        let mut array = [0u8; 33];
+        array.copy_from_slice(&bytes);
+        Ok(array)
+    }
+}
+
+mod hex_array_20 {
+    use serde::{Deserialize, Deserializer, Serializer};
+    use serde::de::Error;
+
+    pub fn serialize<S>(bytes: &[u8; 20], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&hex::encode(bytes))
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<[u8; 20], D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        let bytes = hex::decode(&s).map_err(Error::custom)?;
+        if bytes.len() != 20 {
+            return Err(Error::custom(format!("Expected 20 bytes, got {}", bytes.len())));
+        }
+        let mut array = [0u8; 20];
+        array.copy_from_slice(&bytes);
+        Ok(array)
+    }
+}
+
+impl Wallet {
+    pub fn new() -> Self {
+        // Generate a random private key
+        let mut private_key = [0u8; 32];
+        OsRng.fill_bytes(&mut private_key);
+        
+        // Derive public key (simplified for this example)
+        // In a real implementation, use actual ECC to derive public key
+        let mut hasher = Sha256::new();
+        hasher.update(&private_key);
+        let hash = hasher.finalize();
+        
+        let mut public_key = [0u8; 33];
+        public_key[0] = 0x02; // Compressed public key prefix
+        public_key[1..33].copy_from_slice(&hash);
+        
+        // Derive address from public key
+        let mut hasher = Sha256::new();
+        hasher.update(&public_key);
+        let hash = hasher.finalize();
+        
+        let mut address = [0u8; 20];
+        address.copy_from_slice(&hash[0..20]);
+        
+        Wallet {
+            private_key,
+            public_key,
+            address,
+        }
+    }
+    
+    pub fn from_private_key(private_key: &[u8; 32]) -> Self {
+        // Derive public key from private key
+        let mut hasher = Sha256::new();
+        hasher.update(private_key);
+        let hash = hasher.finalize();
+        
+        let mut public_key = [0u8; 33];
+        public_key[0] = 0x02; // Compressed public key prefix
+        public_key[1..33].copy_from_slice(&hash);
+        
+        // Derive address from public key
+        let mut hasher = Sha256::new();
+        hasher.update(&public_key);
+        let hash = hasher.finalize();
+        
+        let mut address = [0u8; 20];
+        address.copy_from_slice(&hash[0..20]);
+        
+        Wallet {
+            private_key: *private_key,
+            public_key,
+            address,
+        }
+    }
+    
+    pub fn save(&self, path: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
+        warn!("Saving wallet without encryption. Use save_encrypted for better security.");
+        let json = serde_json::to_string(&self)?;
+        fs::write(path, json)?;
+        Ok(())
+    }
+    
+    pub fn load(path: &str) -> Result<Self, Box<dyn Error + Send + Sync>> {
+        let json = fs::read_to_string(path)?;
+        let wallet: Wallet = serde_json::from_str(&json)?;
+        Ok(wallet)
+    }
+    
+    pub fn sign_data(&self, data: &[u8]) -> Vec<u8> {
+        // Simple signature simulation
+        // In a real implementation, use a proper ECC signing algorithm
+        let mut hasher = Sha256::new();
+        hasher.update(&self.private_key);
+        hasher.update(data);
+        let hash = hasher.finalize();
+        
+        hash.to_vec()
+    }
+    
+    pub fn verify_signature(&self, data: &[u8], signature: &[u8]) -> bool {
+        // Simple signature verification simulation
+        // In a real implementation, use a proper ECC signature verification
+        let expected_signature = self.sign_data(data);
+        
+        if expected_signature.len() != signature.len() {
+            return false;
+        }
+        
+        for (a, b) in expected_signature.iter().zip(signature.iter()) {
+            if a != b {
+                return false;
+            }
+        }
+        
+        true
+    }
+    
+    // Encrypt and save wallet to file with password
+    pub fn save_encrypted(&self, path: &str, password: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // Generate a random salt for Argon2
+        let salt = SaltString::generate(&mut OsRng);
+        
+        // Use Argon2 to derive a key from the password
+        let argon2 = Argon2::default();
+        let mut key_bytes = [0u8; 32];
+        argon2.hash_password_into(password.as_bytes(), salt.as_str().as_bytes(), &mut key_bytes)
+            .map_err(|e| format!("Password hashing failed: {}", e))?;
+        
+        let key = Key::from_slice(&key_bytes);
+        
+        // Generate a random nonce
+        let mut nonce_bytes = [0u8; 12];
+        OsRng.fill(&mut nonce_bytes);
+        let nonce = Nonce::from_slice(&nonce_bytes);
+        
+        // Serialize wallet data
+        let wallet_data = serde_json::to_vec(&self)?;
+        
+        // Encrypt the wallet data
+        let cipher = ChaCha20Poly1305::new(key);
+        let encrypted_data = cipher.encrypt(nonce, wallet_data.as_ref())
+            .map_err(|e| format!("Encryption failed: {}", e))?;
+        
+        // Create the encrypted wallet structure
+        let encrypted_wallet = EncryptedWallet {
+            salt: salt.as_str().to_string(),
+            nonce: hex::encode(nonce_bytes),
+            encrypted_data: hex::encode(encrypted_data),
+        };
+        
+        // Serialize and save to file
+        let json = serde_json::to_string(&encrypted_wallet)?;
+        fs::write(path, json)?;
+        
+        // Zero out sensitive data
+        key_bytes.zeroize();
+        
+        Ok(())
+    }
+    
+    // Load wallet from encrypted file with password
+    pub fn load_encrypted(path: &str, password: &str) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        // Read encrypted wallet from file
+        let json = fs::read_to_string(path)?;
+        let encrypted_wallet: EncryptedWallet = serde_json::from_str(&json)?;
+        
+        // Extract salt and derive key
+        let salt = &encrypted_wallet.salt;
+        
+        let argon2 = Argon2::default();
+        let mut key_bytes = [0u8; 32];
+        argon2.hash_password_into(password.as_bytes(), salt.as_bytes(), &mut key_bytes)
+            .map_err(|e| format!("Password verification failed: {}", e))?;
+        
+        let key = Key::from_slice(&key_bytes);
+        
+        // Extract nonce
+        let nonce_bytes = hex::decode(&encrypted_wallet.nonce)?;
+        let nonce = Nonce::from_slice(&nonce_bytes);
+        
+        // Extract encrypted data
+        let encrypted_data = hex::decode(&encrypted_wallet.encrypted_data)?;
+        
+        // Decrypt the wallet data
+        let cipher = ChaCha20Poly1305::new(key);
+        let wallet_data = cipher.decrypt(nonce, encrypted_data.as_ref())
+            .map_err(|_| "Invalid password or corrupted wallet file")?;
+        
+        // Deserialize wallet
+        let wallet: Wallet = serde_json::from_slice(&wallet_data)?;
+        
+        // Zero out sensitive data
+        key_bytes.zeroize();
+        
+        Ok(wallet)
+    }
+}
+
+// Generate a random nonce for transactions
+pub fn generate_nonce() -> u64 {
+    OsRng.next_u64()
+}

@@ -194,6 +194,7 @@ async fn send_transaction(tx_data: serde_json::Value, node_address: &str) -> Res
         .unwrap_or("1")
         .parse()
         .unwrap_or(1);
+    let password = tx_data["password"].as_str(); // Extract password if provided
     
     if from_wallet.is_empty() || to_address.is_empty() || amount == 0 {
         return Ok(warp::reply::json(&json!({
@@ -204,10 +205,18 @@ async fn send_transaction(tx_data: serde_json::Value, node_address: &str) -> Res
     }
     
     // Execute the wallet command to send the transaction
-    let output = tokio::process::Command::new("cargo")
-        .args(&["run", "--bin", "pali-wallet", "--", "--wallet", from_wallet, "send", "--to", to_address, "--amount", &amount.to_string(), "--fee", &fee.to_string()])
-        .output()
-        .await;
+    let mut command = tokio::process::Command::new("cargo");
+    command.args(&["run", "--bin", "pali-wallet", "--", "--wallet", from_wallet]);
+    
+    // Add password if provided
+    if let Some(pwd) = password {
+        command.args(&["--password", pwd]);
+    }
+    
+    // Add the rest of the arguments
+    command.args(&["send", "--to", to_address, "--amount", &amount.to_string(), "--fee", &fee.to_string()]);
+    
+    let output = command.output().await;
     
     match output {
         Ok(output) => {

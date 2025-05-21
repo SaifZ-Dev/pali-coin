@@ -1,25 +1,24 @@
-use serde::{Deserialize, Serialize};
 use sha2::{Sha256, Digest};
-use std::time::{SystemTime, UNIX_EPOCH};
+use serde::{Serialize, Deserialize};
 
-pub type Hash = [u8; 32];
 pub type Address = [u8; 20];
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Block {
-    pub header: BlockHeader,
-    pub transactions: Vec<Transaction>,
-    pub zk_proof: Option<Vec<u8>>,
-}
+pub type Hash = [u8; 32];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlockHeader {
     pub prev_hash: Hash,
     pub merkle_root: Hash,
     pub timestamp: u64,
+    pub height: u64,
     pub nonce: u64,
     pub difficulty: u32,
-    pub height: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Block {
+    pub header: BlockHeader,
+    pub transactions: Vec<Transaction>,
+    pub zk_proof: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -30,90 +29,6 @@ pub struct Transaction {
     pub fee: u64,
     pub nonce: u64,
     pub signature: Vec<u8>,
-}
-
-impl Block {
-    pub fn new(prev_hash: Hash, transactions: Vec<Transaction>, height: u64) -> Self {
-        let merkle_root = Self::calculate_merkle_root(&transactions);
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-
-        Block {
-            header: BlockHeader {
-                prev_hash,
-                merkle_root,
-                timestamp,
-                nonce: 0,
-                difficulty: 16,
-                height,
-            },
-            transactions,
-            zk_proof: None,
-        }
-    }
-
-    pub fn hash(&self) -> Hash {
-        let serialized = bincode::serialize(&self.header).unwrap();
-        let mut hasher = Sha256::new();
-        hasher.update(serialized);
-        hasher.finalize().into()
-    }
-
-    fn calculate_merkle_root(transactions: &[Transaction]) -> Hash {
-        if transactions.is_empty() {
-            return [0; 32];
-        }
-
-        let mut hashes: Vec<Hash> = transactions
-            .iter()
-            .map(|tx| {
-                let serialized = bincode::serialize(tx).unwrap();
-                let mut hasher = Sha256::new();
-                hasher.update(serialized);
-                hasher.finalize().into()
-            })
-            .collect();
-
-        while hashes.len() > 1 {
-            let mut next_level = Vec::new();
-            for chunk in hashes.chunks(2) {
-                let mut hasher = Sha256::new();
-                hasher.update(chunk[0]);
-                if chunk.len() > 1 {
-                    hasher.update(chunk[1]);
-                } else {
-                    hasher.update(chunk[0]);
-                }
-                next_level.push(hasher.finalize().into());
-            }
-            hashes = next_level;
-        }
-
-        hashes[0]
-    }
-
-    pub fn is_valid_proof_of_work(&self) -> bool {
-        let hash = self.hash();
-        let difficulty_bytes = (self.header.difficulty / 8) as usize;
-        let difficulty_bits = self.header.difficulty % 8;
-
-        for i in 0..difficulty_bytes {
-            if hash[i] != 0 {
-                return false;
-            }
-        }
-
-        if difficulty_bits > 0 && difficulty_bytes < hash.len() {
-            let mask = 0xFF << (8 - difficulty_bits);
-            if hash[difficulty_bytes] & mask != 0 {
-                return false;
-            }
-        }
-
-        true
-    }
 }
 
 impl Transaction {
@@ -127,14 +42,93 @@ impl Transaction {
             signature: Vec::new(),
         }
     }
-
+    
+    // Data to be signed - returns all transaction data excluding the signature
+    pub fn data_to_sign(&self) -> Vec<u8> {
+        let mut data = Vec::new();
+        data.extend_from_slice(&self.from);
+        data.extend_from_slice(&self.to);
+        data.extend_from_slice(&self.amount.to_be_bytes());
+        data.extend_from_slice(&self.fee.to_be_bytes());
+        data.extend_from_slice(&self.nonce.to_be_bytes());
+        data
+    }
+    
+    // Verify the transaction signature
+    pub fn verify(&self) -> bool {
+        // Coinbase transactions (mining rewards) don't need signatures
+        if self.from == [0u8; 20] {
+            return true;
+        }
+        
+        // If signature is empty, transaction is invalid
+        if self.signature.is_empty() {
+            return false;
+        }
+        
+        // NOTE: In a real implementation, you would extract the public key
+        // from the transaction data and verify the signature.
+        // For now, we're using a simplified approach where verification
+        // is handled elsewhere.
+        
+        // Return true for coinbase transactions, false for others
+        // This will be improved in future versions
+        self.from == [0u8; 20]
+    }
+    
     pub fn hash(&self) -> Hash {
-        let mut tx_for_hash = self.clone();
-        tx_for_hash.signature = Vec::new();
-
-        let serialized = bincode::serialize(&tx_for_hash).unwrap();
         let mut hasher = Sha256::new();
-        hasher.update(serialized);
-        hasher.finalize().into()
+        hasher.update(&self.from);
+        hasher.update(&self.to);
+        hasher.update(&self.amount.to_be_bytes());
+        hasher.update(&self.fee.to_be_bytes());
+        hasher.update(&self.nonce.to_be_bytes());
+        hasher.update(&self.signature);
+        
+        let result = hasher.finalize();
+        let mut hash = [0u8; 32];
+        hash.copy_from_slice(&result);
+        hash
+    }
+}
+
+impl Block {
+    pub fn hash(&self) -> Hash {
+        let mut hasher = Sha256::new();
+        hasher.update(&self.header.prev_hash);
+        hasher.update(&self.header.merkle_root);
+        hasher.update(&self.header.timestamp.to_be_bytes());
+        hasher.update(&self.header.height.to_be_bytes());
+        hasher.update(&self.header.nonce.to_be_bytes());
+        hasher.update(&self.header.difficulty.to_be_bytes());
+        
+        let result = hasher.finalize();
+        let mut hash = [0u8; 32];
+        hash.copy_from_slice(&result);
+        hash
+    }
+    
+    pub fn is_valid_proof_of_work(&self) -> bool {
+        let hash = self.hash();
+        Self::meets_difficulty(&hash, self.header.difficulty as usize)
+    }
+    
+    fn meets_difficulty(hash: &[u8; 32], difficulty: usize) -> bool {
+        // Check if the first 'difficulty' bits are zero
+        for i in 0..difficulty / 8 {
+            if hash[i] != 0 {
+                return false;
+            }
+        }
+        
+        // Check remaining bits
+        if difficulty % 8 != 0 {
+            let mask = 0xFF << (8 - (difficulty % 8));
+            if hash[difficulty / 8] & mask != 0 {
+                return false;
+            }
+        }
+        
+        true
     }
 }

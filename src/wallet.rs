@@ -1,537 +1,527 @@
-mod types;
-mod blockchain;
-mod network;
-
-use network::{NetworkMessage, NetworkClient};
-use types::{Transaction, Address};
-use clap::{Arg, Command};
-use std::fs;
-use std::path::Path;
-use tokio::time::sleep;
-use tokio::time::Duration;
+use serde::{Serialize, Deserialize};
+use sha2::{Sha256, Digest};
 use rand::rngs::OsRng;
 use rand::RngCore;
-use sha2::{Sha256, Digest};
-use secp256k1::{Secp256k1, SecretKey, PublicKey, Message};
-use serde::{Serialize, Deserialize};
+use std::fs;
+use std::error::Error;
+use log::warn;
+use argon2::{Argon2, password_hash::SaltString};
+use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
+use chacha20poly1305::aead::Aead;
+use chacha20poly1305::KeyInit;
+use rand::Rng;
+use zeroize::Zeroize;
+use bip39::{Language, Mnemonic};
+use secp256k1::{Secp256k1, Message, SecretKey, PublicKey};
+use secp256k1::rand::rngs::OsRng as Secp256k1OsRng;
 
+// Define a structure for the encrypted wallet
 #[derive(Serialize, Deserialize)]
-struct Wallet {
-    // We don't serialize the actual Secp256k1 objects
-    #[serde(skip_serializing, skip_deserializing)]
-    secret_key: Option<SecretKey>,
-    #[serde(skip_serializing, skip_deserializing)]
-    public_key: Option<PublicKey>,
-    
-    // Store the bytes for serialization
-    secret_key_bytes: Vec<u8>,
-    public_key_bytes: Vec<u8>,
-    address: Address,
+pub struct EncryptedWallet {
+    pub salt: String,
+    pub nonce: String,
+    pub encrypted_data: String,
+}
+
+// Custom serialization for byte arrays
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Wallet {
+    #[serde(with = "hex_array_32")]
+    pub private_key: [u8; 32],
+    #[serde(with = "hex_array_33")]
+    pub public_key: [u8; 33],
+    #[serde(with = "hex_array_20")]
+    pub address: [u8; 20],
+}
+
+// Custom serialization modules for different size byte arrays
+mod hex_array_32 {
+    use serde::{Deserialize, Deserializer, Serializer};
+    use serde::de::Error;
+
+    pub fn serialize<S>(bytes: &[u8; 32], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&hex::encode(bytes))
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<[u8; 32], D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        let bytes = hex::decode(&s).map_err(Error::custom)?;
+        if bytes.len() != 32 {
+            return Err(Error::custom(format!("Expected 32 bytes, got {}", bytes.len())));
+        }
+        let mut array = [0u8; 32];
+        array.copy_from_slice(&bytes);
+        Ok(array)
+    }
+}
+
+mod hex_array_33 {
+    use serde::{Deserialize, Deserializer, Serializer};
+    use serde::de::Error;
+
+    pub fn serialize<S>(bytes: &[u8; 33], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&hex::encode(bytes))
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<[u8; 33], D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        let bytes = hex::decode(&s).map_err(Error::custom)?;
+        if bytes.len() != 33 {
+            return Err(Error::custom(format!("Expected 33 bytes, got {}", bytes.len())));
+        }
+        let mut array = [0u8; 33];
+        array.copy_from_slice(&bytes);
+        Ok(array)
+    }
+}
+
+mod hex_array_20 {
+    use serde::{Deserialize, Deserializer, Serializer};
+    use serde::de::Error;
+
+    pub fn serialize<S>(bytes: &[u8; 20], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&hex::encode(bytes))
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<[u8; 20], D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        let bytes = hex::decode(&s).map_err(Error::custom)?;
+        if bytes.len() != 20 {
+            return Err(Error::custom(format!("Expected 20 bytes, got {}", bytes.len())));
+        }
+        let mut array = [0u8; 20];
+        array.copy_from_slice(&bytes);
+        Ok(array)
+    }
 }
 
 impl Wallet {
-    fn new() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        // Use secp256k1 (same as Bitcoin)
+    pub fn new() -> Self {
+        // Create a proper secp256k1 context
         let secp = Secp256k1::new();
-        let mut os_rng = OsRng::default();
         
-        // Generate random bytes for the secret key (32 bytes)
-        let mut random_bytes = [0u8; 32];
-        os_rng.fill_bytes(&mut random_bytes);
+        // Generate a random private key
+        let (secret_key, public_key) = secp.generate_keypair(&mut Secp256k1OsRng);
         
-        // Create secret key from random bytes
-        let secret_key = SecretKey::from_slice(&random_bytes)?;
-        let public_key = PublicKey::from_secret_key(&secp, &secret_key);
+        // Convert to bytes
+        let private_key = secret_key.secret_bytes();
+        let public_key_bytes = public_key.serialize();
         
-        // Create address from public key (similar to Bitcoin)
-        let address = Self::public_key_to_address(&public_key);
+        // Generate address from public key (using a simple hash for now)
+        // In a real implementation, you might want to use RIPEMD160(SHA256(publicKey)) like Bitcoin
+        let mut hasher = Sha256::new();
+        hasher.update(&public_key_bytes);
+        let hash = hasher.finalize();
         
-        Ok(Wallet {
-            secret_key: Some(secret_key),
-            public_key: Some(public_key),
-            secret_key_bytes: secret_key[..].to_vec(),
-            public_key_bytes: public_key.serialize().to_vec(),
+        let mut address = [0u8; 20];
+        address.copy_from_slice(&hash[0..20]);
+        
+        Wallet {
+            private_key,
+            public_key: public_key_bytes,
             address,
-        })
+        }
     }
-
-    fn from_file(path: &Path) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        let contents = fs::read_to_string(path)?;
-        let mut wallet: Wallet = serde_json::from_str(&contents)?;
+    
+    pub fn from_private_key(private_key: &[u8; 32]) -> Self {
+        // Create a proper secp256k1 context
+        let secp = Secp256k1::new();
         
-        // Recreate the secret and public keys
-        wallet.secret_key = Some(SecretKey::from_slice(&wallet.secret_key_bytes)?);
-        wallet.public_key = Some(PublicKey::from_slice(&wallet.public_key_bytes)?);
+        // Recreate the secret key from bytes
+        let secret_key = SecretKey::from_slice(private_key)
+            .expect("Invalid private key");
+        
+        // Derive the public key
+        let public_key = PublicKey::from_secret_key(&secp, &secret_key);
+        let public_key_bytes = public_key.serialize();
+        
+        // Generate address from public key
+        let mut hasher = Sha256::new();
+        hasher.update(&public_key_bytes);
+        let hash = hasher.finalize();
+        
+        let mut address = [0u8; 20];
+        address.copy_from_slice(&hash[0..20]);
+        
+        Wallet {
+            private_key: *private_key,
+            public_key: public_key_bytes,
+            address,
+        }
+    }
+    
+    pub fn save(&self, path: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
+        warn!("Saving wallet without encryption. Use save_encrypted for better security.");
+        let json = serde_json::to_string(&self)?;
+        fs::write(path, json)?;
+        Ok(())
+    }
+    
+    pub fn load(path: &str) -> Result<Self, Box<dyn Error + Send + Sync>> {
+        let json = fs::read_to_string(path)?;
+        let wallet: Wallet = serde_json::from_str(&json)?;
+        Ok(wallet)
+    }
+    
+    pub fn sign_data(&self, data: &[u8]) -> Vec<u8> {
+        // Create a proper secp256k1 context
+        let secp = Secp256k1::new();
+        
+        // Create a message by hashing the data
+        let mut hasher = Sha256::new();
+        hasher.update(data);
+        let hash = hasher.finalize();
+        
+        // Convert hash to a message
+        let message = Message::from_digest_slice(&hash)
+            .expect("Failed to create message from hash");
+        
+        // Recreate the secret key from bytes
+        let secret_key = SecretKey::from_slice(&self.private_key)
+            .expect("Invalid private key");
+        
+        // Sign the message
+        let signature = secp.sign_ecdsa(&message, &secret_key);
+        
+        // Convert to compact signature format
+        signature.serialize_compact().to_vec()
+    }
+    
+    pub fn verify_signature(&self, data: &[u8], signature: &[u8]) -> bool {
+        // Create a proper secp256k1 context
+        let secp = Secp256k1::new();
+        
+        // Create a message by hashing the data
+        let mut hasher = Sha256::new();
+        hasher.update(data);
+        let hash = hasher.finalize();
+        
+        // Convert hash to a message
+        let message = match Message::from_digest_slice(&hash) {
+            Ok(msg) => msg,
+            Err(_) => return false,
+        };
+        
+        // Recreate the public key from bytes
+        let public_key = match PublicKey::from_slice(&self.public_key) {
+            Ok(key) => key,
+            Err(_) => return false,
+        };
+        
+        // Deserialize signature
+        if signature.len() != 64 {
+            return false;
+        }
+        
+        let mut sig_bytes = [0u8; 64];
+        sig_bytes.copy_from_slice(signature);
+        
+        let signature = match secp256k1::ecdsa::Signature::from_compact(&sig_bytes) {
+            Ok(sig) => sig,
+            Err(_) => return false,
+        };
+        
+        // Verify the signature
+        secp.verify_ecdsa(&message, &signature, &public_key).is_ok()
+    }
+    
+    // Encrypt and save wallet to file with password
+    pub fn save_encrypted(&self, path: &str, password: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // Generate a random salt for Argon2
+        let salt = SaltString::generate(&mut OsRng);
+        
+        // Use Argon2 to derive a key from the password
+        let argon2 = Argon2::default();
+        let mut key_bytes = [0u8; 32];
+        argon2.hash_password_into(password.as_bytes(), salt.as_str().as_bytes(), &mut key_bytes)
+            .map_err(|e| format!("Password hashing failed: {}", e))?;
+        
+        let key = Key::from_slice(&key_bytes);
+        
+        // Generate a random nonce
+        let mut nonce_bytes = [0u8; 12];
+        OsRng.fill(&mut nonce_bytes);
+        let nonce = Nonce::from_slice(&nonce_bytes);
+        
+        // Serialize wallet data
+        let wallet_data = serde_json::to_vec(&self)?;
+        
+        // Encrypt the wallet data
+        let cipher = ChaCha20Poly1305::new(key);
+        let encrypted_data = cipher.encrypt(nonce, wallet_data.as_ref())
+            .map_err(|e| format!("Encryption failed: {}", e))?;
+        
+        // Create the encrypted wallet structure
+        let encrypted_wallet = EncryptedWallet {
+            salt: salt.as_str().to_string(),
+            nonce: hex::encode(nonce_bytes),
+            encrypted_data: hex::encode(encrypted_data),
+        };
+        
+        // Serialize and save to file
+        let json = serde_json::to_string(&encrypted_wallet)?;
+        fs::write(path, json)?;
+        
+        // Zero out sensitive data
+        key_bytes.zeroize();
+        
+        Ok(())
+    }
+    
+    // Load wallet from encrypted file with password
+    pub fn load_encrypted(path: &str, password: &str) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        // Read encrypted wallet from file
+        let json = fs::read_to_string(path)?;
+        let encrypted_wallet: EncryptedWallet = serde_json::from_str(&json)?;
+        
+        // Extract salt and derive key
+        let salt = &encrypted_wallet.salt;
+        
+        let argon2 = Argon2::default();
+        let mut key_bytes = [0u8; 32];
+        argon2.hash_password_into(password.as_bytes(), salt.as_bytes(), &mut key_bytes)
+            .map_err(|e| format!("Password verification failed: {}", e))?;
+        
+        let key = Key::from_slice(&key_bytes);
+        
+        // Extract nonce
+        let nonce_bytes = hex::decode(&encrypted_wallet.nonce)?;
+        let nonce = Nonce::from_slice(&nonce_bytes);
+        
+        // Extract encrypted data
+        let encrypted_data = hex::decode(&encrypted_wallet.encrypted_data)?;
+        
+        // Decrypt the wallet data
+        let cipher = ChaCha20Poly1305::new(key);
+        let wallet_data = cipher.decrypt(nonce, encrypted_data.as_ref())
+            .map_err(|_| "Invalid password or corrupted wallet file")?;
+        
+        // Deserialize wallet
+        let wallet: Wallet = serde_json::from_slice(&wallet_data)?;
+        
+        // Zero out sensitive data
+        key_bytes.zeroize();
         
         Ok(wallet)
     }
-
-    fn save_to_file(&self, path: &Path) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let contents = serde_json::to_string_pretty(self)?;
-        fs::write(path, contents)?;
-        Ok(())
-    }
-
-    fn public_key_to_address(public_key: &PublicKey) -> Address {
-        // Similar to Bitcoin: SHA-256 followed by taking first 20 bytes
-        let serialized = public_key.serialize();
-        let hash = Sha256::digest(&serialized);
+    
+    // Generate a new wallet with a seed phrase
+    pub fn new_with_seed_phrase() -> (Self, String) {
+        // Generate random entropy (32 bytes for 24 words)
+        let mut entropy = [0u8; 32];
+        OsRng.fill_bytes(&mut entropy);
         
-        // Take first 20 bytes for the address
+        // Create mnemonic from entropy
+        let mnemonic = Mnemonic::from_entropy(&entropy).expect("Failed to generate mnemonic");
+        
+        // Get the phrase as a string
+        let phrase = mnemonic.to_string();
+        
+        // Generate seed from mnemonic
+        let seed = mnemonic.to_seed("");
+        
+        // Use first 32 bytes as private key
+        let mut private_key = [0u8; 32];
+        private_key.copy_from_slice(&seed[0..32]);
+        
+        // Derive the wallet with ECDSA
+        let secp = Secp256k1::new();
+        
+        let secret_key = SecretKey::from_slice(&private_key)
+            .expect("Invalid private key from seed");
+        
+        let public_key = PublicKey::from_secret_key(&secp, &secret_key);
+        let public_key_bytes = public_key.serialize();
+        
+        // Generate address from public key
+        let mut hasher = Sha256::new();
+        hasher.update(&public_key_bytes);
+        let hash = hasher.finalize();
+        
         let mut address = [0u8; 20];
         address.copy_from_slice(&hash[0..20]);
-        address
+        
+        let wallet = Wallet {
+            private_key,
+            public_key: public_key_bytes,
+            address,
+        };
+        
+        (wallet, phrase)
     }
-
-    fn sign_transaction(&self, tx: &mut Transaction) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    
+    // Recover a wallet from a seed phrase
+    pub fn from_seed_phrase(phrase: &str) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        // Validate and parse the mnemonic
+        let mnemonic = Mnemonic::parse_in(Language::English, phrase)
+            .map_err(|e| format!("Invalid seed phrase: {}", e))?;
+        
+        // Generate seed from mnemonic
+        let seed = mnemonic.to_seed("");
+        
+        // Use first 32 bytes as private key
+        let mut private_key = [0u8; 32];
+        private_key.copy_from_slice(&seed[0..32]);
+        
+        // Derive the wallet with ECDSA
         let secp = Secp256k1::new();
-        let secret_key = self.secret_key.as_ref().ok_or("Secret key not loaded")?;
         
-        // Hash the transaction
-        let tx_hash = tx.hash();
+        let secret_key = SecretKey::from_slice(&private_key)
+            .map_err(|_| "Invalid private key generated from seed phrase")?;
         
-        // Create a message from the transaction hash
-        let message = Message::from_slice(&tx_hash)?;
+        let public_key = PublicKey::from_secret_key(&secp, &secret_key);
+        let public_key_bytes = public_key.serialize();
         
-        // Sign the message
-        let signature = secp.sign_ecdsa(&message, secret_key);
+        // Generate address from public key
+        let mut hasher = Sha256::new();
+        hasher.update(&public_key_bytes);
+        let hash = hasher.finalize();
         
-        // Store the signature in the transaction
-        tx.signature = signature.serialize_compact().to_vec();
+        let mut address = [0u8; 20];
+        address.copy_from_slice(&hash[0..20]);
+        
+        Ok(Wallet {
+            private_key,
+            public_key: public_key_bytes,
+            address,
+        })
+    }
+    
+    // Save wallet with seed phrase (encrypt both)
+    pub fn save_with_seed_phrase(&self, path: &str, seed_phrase: &str, password: &str) 
+        -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // Create a structure with wallet and seed phrase
+        let wallet_data = WalletWithSeed {
+            wallet: self.clone(),
+            seed_phrase: seed_phrase.to_string(),
+        };
+        
+        // Encrypt and save
+        // Generate a random salt for Argon2
+        let salt = SaltString::generate(&mut OsRng);
+        
+        // Use Argon2 to derive a key from the password
+        let argon2 = Argon2::default();
+        let mut key_bytes = [0u8; 32];
+        argon2.hash_password_into(password.as_bytes(), salt.as_str().as_bytes(), &mut key_bytes)
+            .map_err(|e| format!("Password hashing failed: {}", e))?;
+        
+        let key = Key::from_slice(&key_bytes);
+        
+        // Generate a random nonce
+        let mut nonce_bytes = [0u8; 12];
+        OsRng.fill(&mut nonce_bytes);
+        let nonce = Nonce::from_slice(&nonce_bytes);
+        
+        // Serialize wallet data
+        let wallet_data = serde_json::to_vec(&wallet_data)?;
+        
+        // Encrypt the wallet data
+        let cipher = ChaCha20Poly1305::new(key);
+        let encrypted_data = cipher.encrypt(nonce, wallet_data.as_ref())
+            .map_err(|e| format!("Encryption failed: {}", e))?;
+        
+        // Create the encrypted wallet structure
+        let encrypted_wallet = EncryptedWallet {
+            salt: salt.as_str().to_string(),
+            nonce: hex::encode(nonce_bytes),
+            encrypted_data: hex::encode(encrypted_data),
+        };
+        
+        // Serialize and save to file
+        let json = serde_json::to_string(&encrypted_wallet)?;
+        fs::write(path, json)?;
+        
+        // Zero out sensitive data
+        key_bytes.zeroize();
         
         Ok(())
     }
-
-    fn get_address_string(&self) -> String {
-        hex::encode(self.address)
+    
+    // Load wallet with seed phrase
+    pub fn load_with_seed_phrase(path: &str, password: &str) 
+        -> Result<(Self, String), Box<dyn std::error::Error + Send + Sync>> {
+        // Read encrypted wallet from file
+        let json = fs::read_to_string(path)?;
+        let encrypted_wallet: EncryptedWallet = serde_json::from_str(&json)?;
+        
+        // Extract salt and derive key
+        let salt = &encrypted_wallet.salt;
+        
+        let argon2 = Argon2::default();
+        let mut key_bytes = [0u8; 32];
+        argon2.hash_password_into(password.as_bytes(), salt.as_bytes(), &mut key_bytes)
+            .map_err(|e| format!("Password verification failed: {}", e))?;
+        
+        let key = Key::from_slice(&key_bytes);
+        
+        // Extract nonce
+        let nonce_bytes = hex::decode(&encrypted_wallet.nonce)?;
+        let nonce = Nonce::from_slice(&nonce_bytes);
+        
+        // Extract encrypted data
+        let encrypted_data = hex::decode(&encrypted_wallet.encrypted_data)?;
+        
+        // Decrypt the wallet data
+        let cipher = ChaCha20Poly1305::new(key);
+        let wallet_data = cipher.decrypt(nonce, encrypted_data.as_ref())
+            .map_err(|_| "Invalid password or corrupted wallet file")?;
+        
+        // Deserialize wallet with seed
+        let wallet_with_seed: WalletWithSeed = serde_json::from_slice(&wallet_data)?;
+        
+        // Zero out sensitive data
+        key_bytes.zeroize();
+        
+        Ok((wallet_with_seed.wallet, wallet_with_seed.seed_phrase))
+    }
+    
+    // Sign a transaction using this wallet
+    pub fn sign_transaction(&self, tx: &mut crate::types::Transaction) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // Verify that the from address matches the wallet address
+        if tx.from != self.address {
+            return Err("Transaction from address does not match wallet address".into());
+        }
+        
+        // Get the transaction data to sign
+        let data = tx.data_to_sign();
+        
+        // Sign the data using the wallet's private key
+        let signature = self.sign_data(&data);
+        
+        // Set the signature in the transaction
+        tx.signature = signature;
+        
+        Ok(())
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    env_logger::init();
-
-    let matches = Command::new("Pali Coin Wallet")
-        .version("0.1.0")
-        .about("Pali Coin wallet for managing addresses and transactions")
-        .arg(
-            Arg::new("wallet-file")
-                .short('w')
-                .long("wallet")
-                .value_name("FILE")
-                .help("Wallet file path")
-                .default_value("./wallet.json"),
-        )
-        .arg(
-            Arg::new("node")
-                .short('n')
-                .long("node")
-                .value_name("ADDRESS")
-                .help("Node address")
-                .default_value("127.0.0.1:8333"),
-        )
-        .arg(
-            Arg::new("data-dir")
-                .short('d')
-                .long("data-dir")
-                .value_name("DIR")
-                .help("Blockchain data directory")
-                .default_value("./pali_data"),
-        )
-        .subcommand(
-            Command::new("create")
-                .about("Create a new wallet")
-        )
-        .subcommand(
-            Command::new("address")
-                .about("Show wallet address")
-        )
-        .subcommand(
-            Command::new("balance")
-                .about("Check balance")
-        )
-        .subcommand(
-            Command::new("send")
-                .about("Send Pali coins")
-                .arg(
-                    Arg::new("to")
-                        .short('t')
-                        .long("to")
-                        .value_name("ADDRESS")
-                        .help("Recipient address")
-                        .required(true)
-                )
-                .arg(
-                    Arg::new("amount")
-                        .short('a')
-                        .long("amount")
-                        .value_name("AMOUNT")
-                        .help("Amount to send")
-                        .required(true)
-                )
-                .arg(
-                    Arg::new("fee")
-                        .short('f')
-                        .long("fee")
-                        .value_name("FEE")
-                        .help("Transaction fee")
-                        .default_value("1")
-                )
-        )
-        .subcommand(
-            Command::new("history")
-                .about("Show transaction history")
-        )
-        .subcommand(
-            Command::new("info")
-                .about("Show blockchain info")
-        )
-        .get_matches();
-
-    let wallet_file = Path::new(matches.get_one::<String>("wallet-file").unwrap());
-    let node_address = matches.get_one::<String>("node").unwrap();
-    let _data_dir = matches.get_one::<String>("data-dir").unwrap(); // Unused, so prefix with underscore
-
-    match matches.subcommand() {
-        Some(("create", _)) => {
-            create_wallet(wallet_file).await?;
-        }
-        Some(("address", _)) => {
-            show_address(wallet_file).await?;
-        }
-        Some(("balance", _)) => {
-            check_balance(wallet_file, node_address).await?;
-        }
-        Some(("send", sub_matches)) => {
-            let to = sub_matches.get_one::<String>("to").unwrap();
-            let amount: u64 = sub_matches.get_one::<String>("amount").unwrap().parse()?;
-            let fee: u64 = sub_matches.get_one::<String>("fee").unwrap().parse()?;
-            send_transaction(wallet_file, node_address, to, amount, fee).await?;
-        }
-        Some(("history", _)) => {
-            get_transaction_history(wallet_file, node_address).await?;
-        }
-        Some(("info", _)) => {
-            show_blockchain_info(node_address).await?;
-        }
-        _ => {
-            println!("No subcommand provided. Use --help for usage information.");
-        }
-    }
-
-    Ok(())
+// Structure to store wallet and seed phrase together
+#[derive(Serialize, Deserialize, Clone)]
+struct WalletWithSeed {
+    wallet: Wallet,
+    seed_phrase: String,
 }
 
-async fn create_wallet(wallet_file: &Path) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    if wallet_file.exists() {
-        println!("Wallet file already exists: {}", wallet_file.display());
-        return Ok(());
-    }
-
-    let wallet = Wallet::new()?;
-    wallet.save_to_file(wallet_file)?;
-
-    println!("Created new wallet!");
-    println!("Address: {}", wallet.get_address_string());
-    println!("Wallet saved to: {}", wallet_file.display());
-    println!("⚠️  Keep your wallet file safe! It contains your private key.");
-
-    Ok(())
-}
-
-async fn show_address(wallet_file: &Path) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let wallet = Wallet::from_file(wallet_file)?;
-    println!("Wallet address: {}", wallet.get_address_string());
-    Ok(())
-}
-
-async fn check_balance(
-    wallet_file: &Path,
-    node_address: &str,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let wallet = Wallet::from_file(wallet_file)?;
-    let address = wallet.get_address_string();
-    
-    println!("Checking balance for address: {}", address);
-    
-    // Connect to node
-    match NetworkClient::connect(node_address).await {
-        Ok(mut client) => {
-            let _node_id = client.handshake("pali-wallet").await?;
-            println!("Connected to node: {}", node_address);
-            
-            // Send balance query
-            client.send_message(&NetworkMessage::GetBalance { 
-                address: address.clone() 
-            }).await?;
-            
-            // Wait for response with timeout
-            let timeout = Duration::from_secs(5);
-            let start = std::time::Instant::now();
-            
-            while start.elapsed() < timeout {
-                match client.receive_message().await {
-                    Ok(NetworkMessage::Balance { address: addr, amount }) => {
-                        if addr == address {
-                            println!("Balance: {} PALI", amount);
-                            return Ok(());
-                        } else {
-                            println!("Received balance for different address: {}", addr);
-                        }
-                    },
-                    Ok(NetworkMessage::Error { message }) => {
-                        println!("Error from node: {}", message);
-                        return Ok(());
-                    },
-                    Ok(_) => {
-                        // Ignore other message types, continue waiting
-                        sleep(Duration::from_millis(100)).await;
-                    },
-                    Err(e) => {
-                        return Err(e);
-                    }
-                }
-            }
-            
-            println!("Timed out waiting for balance response");
-        },
-        Err(e) => {
-            println!("Failed to connect to node: {}", e);
-            println!("Please make sure the node is running at {}", node_address);
-        }
-    }
-    
-    Ok(())
-}
-
-async fn send_transaction(
-    wallet_file: &Path,
-    node_address: &str,
-    to_address: &str,
-    amount: u64,
-    fee: u64,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let wallet = Wallet::from_file(wallet_file)?;
-    
-    // Connect to node
-    match NetworkClient::connect(node_address).await {
-        Ok(mut client) => {
-            let _node_id = client.handshake("pali-wallet").await?;
-            println!("Connected to node: {}", node_address);
-            
-            // First check if we have enough balance
-            let from_address = wallet.get_address_string();
-            client.send_message(&NetworkMessage::GetBalance { 
-                address: from_address.clone() 
-            }).await?;
-            
-            // Wait for balance response
-            let mut balance: Option<u64> = None;
-            let timeout = Duration::from_secs(5);
-            let start = std::time::Instant::now();
-            
-            while start.elapsed() < timeout && balance.is_none() {
-                match client.receive_message().await {
-                    Ok(NetworkMessage::Balance { address: addr, amount }) => {
-                        if addr == from_address {
-                            balance = Some(amount);
-                        }
-                    },
-                    Ok(_) => {
-                        // Ignore other message types, continue waiting
-                        sleep(Duration::from_millis(100)).await;
-                    },
-                    Err(e) => {
-                        return Err(e);
-                    }
-                }
-            }
-            
-            if balance.is_none() {
-                return Err("Timed out waiting for balance response".into());
-            }
-            
-            let balance = balance.unwrap();
-            if balance < amount + fee {
-                return Err(format!("Insufficient funds. Balance: {} PALI, Required: {} PALI", 
-                                 balance, amount + fee).into());
-            }
-            
-            // Parse recipient address
-            match hex::decode(to_address) {
-                Ok(to_bytes) => {
-                    if to_bytes.len() != 20 {
-                        return Err(format!("Invalid address length: expected 20 bytes, got {}", to_bytes.len()).into());
-                    }
-                    
-                    let mut to_addr = [0u8; 20];
-                    to_addr.copy_from_slice(&to_bytes);
-
-                    // Create transaction
-                    let mut transaction = Transaction::new(
-                        wallet.address,
-                        to_addr,
-                        amount,
-                        fee,
-                        0, // In a real implementation, we'd get the nonce from the node
-                    );
-
-                    // Sign transaction with high security
-                    wallet.sign_transaction(&mut transaction)?;
-
-                    println!("Transaction created:");
-                    println!("  From: {}", wallet.get_address_string());
-                    println!("  To: {}", to_address);
-                    println!("  Amount: {} PALI", amount);
-                    println!("  Fee: {} PALI", fee);
-                    println!("  Transaction hash: {}", hex::encode(transaction.hash()));
-
-                    // Send transaction to node
-                    client.send_message(&NetworkMessage::NewTransaction { 
-                        transaction: transaction.clone() 
-                    }).await?;
-                    
-                    println!("Transaction submitted to node.");
-                    println!("Waiting for confirmation...");
-                    
-                    // Give the node some time to process
-                    sleep(Duration::from_secs(2)).await;
-                    
-                    println!("Transaction sent successfully!");
-                },
-                Err(e) => {
-                    return Err(format!("Invalid address format: '{}' is not a valid hex string. Error: {}", to_address, e).into());
-                }
-            }
-        },
-        Err(e) => {
-            println!("Failed to connect to node: {}", e);
-            println!("Please make sure the node is running at {}", node_address);
-        }
-    }
-
-    Ok(())
-}
-
-async fn get_transaction_history(
-    wallet_file: &Path,
-    node_address: &str,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let wallet = Wallet::from_file(wallet_file)?;
-    let address = wallet.get_address_string();
-    
-    println!("Getting transaction history for address: {}", address);
-    
-    // Connect to node
-    match NetworkClient::connect(node_address).await {
-        Ok(mut client) => {
-            let _node_id = client.handshake("pali-wallet").await?;
-            println!("Connected to node: {}", node_address);
-            
-            // Send transaction history query
-            client.send_message(&NetworkMessage::GetTransactionHistory { 
-                address: address.clone() 
-            }).await?;
-            
-            // Wait for response with timeout
-            let timeout = Duration::from_secs(5);
-            let start = std::time::Instant::now();
-            
-            while start.elapsed() < timeout {
-                match client.receive_message().await {
-                    Ok(NetworkMessage::TransactionHistory { address: addr, transactions }) => {
-                        if addr == address {
-                            if transactions.is_empty() {
-                                println!("No transactions found for this address.");
-                            } else {
-                                println!("Transaction History:");
-                                for (i, tx) in transactions.iter().enumerate() {
-                                    println!("{}. Hash: {}", i+1, tx.hash);
-                                    println!("   From: {}", tx.from);
-                                    println!("   To: {}", tx.to);
-                                    println!("   Amount: {} PALI", tx.amount);
-                                    println!("   Fee: {} PALI", tx.fee);
-                                    println!("   Block: {}", tx.block_height);
-                                    println!("   Timestamp: {}", tx.timestamp);
-                                    println!();
-                                }
-                            }
-                            return Ok(());
-                        } else {
-                            println!("Received history for different address: {}", addr);
-                        }
-                    },
-                    Ok(NetworkMessage::Error { message }) => {
-                        println!("Error from node: {}", message);
-                        return Ok(());
-                    },
-                    Ok(_) => {
-                        // Ignore other message types, continue waiting
-                        sleep(Duration::from_millis(100)).await;
-                    },
-                    Err(e) => {
-                        return Err(e);
-                    }
-                }
-            }
-            
-            println!("Timed out waiting for transaction history response");
-        },
-        Err(e) => {
-            println!("Failed to connect to node: {}", e);
-            println!("Please make sure the node is running at {}", node_address);
-        }
-    }
-    
-    Ok(())
-}
-
-async fn show_blockchain_info(
-    node_address: &str,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    println!("Getting blockchain information...");
-    
-    // Connect to node
-    match NetworkClient::connect(node_address).await {
-        Ok(mut client) => {
-            let _node_id = client.handshake("pali-wallet").await?;
-            println!("Connected to node: {}", node_address);
-            
-            // Get blockchain height
-            client.send_message(&NetworkMessage::GetHeight).await?;
-            
-            // Wait for response with timeout
-            let timeout = Duration::from_secs(5);
-            let start = std::time::Instant::now();
-            
-            while start.elapsed() < timeout {
-                match client.receive_message().await {
-                    Ok(NetworkMessage::Height { height }) => {
-                        println!("Blockchain Information:");
-                        println!("  Chain height: {}", height);
-                        
-                        // We could request more info like latest block hash, etc.
-                        // But for now we'll just show the height
-                        
-                        return Ok(());
-                    },
-                    Ok(_) => {
-                        // Ignore other message types, continue waiting
-                        sleep(Duration::from_millis(100)).await;
-                    },
-                    Err(e) => {
-                        return Err(e);
-                    }
-                }
-            }
-            
-            println!("Timed out waiting for blockchain info response");
-        },
-        Err(e) => {
-            println!("Failed to connect to node: {}", e);
-            println!("Please make sure the node is running at {}", node_address);
-        }
-    }
-    
-    Ok(())
+// Generate a random nonce for transactions
+pub fn generate_nonce() -> u64 {
+    OsRng.next_u64()
 }
