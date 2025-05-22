@@ -1,3 +1,4 @@
+// src/network.rs
 use serde::{Deserialize, Serialize};
 use crate::types::{Block, Transaction, Hash};
 use tokio::net::TcpStream;

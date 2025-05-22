@@ -1,12 +1,13 @@
+// src/miner.rs
 mod types;
 mod network;
 
 use network::{NetworkMessage, NetworkClient};
+use types::meets_difficulty;
 use clap::{Arg, Command};
 use std::time::Duration;
 use rand::Rng;
-use sha2::{Sha256, Digest};
-use log::{info, debug, error};
+use log::{info, debug, error, warn};
 use std::fs;
 use tokio::time::sleep;
 
@@ -64,9 +65,16 @@ async fn mine_block(client: &mut NetworkClient, miner_address: &str) -> Result<(
     // Get block template
     client.send_message(&NetworkMessage::GetTemplate).await?;
     
-    let template = match client.receive_message().await? {
+    let mut block = match client.receive_message().await? {
         NetworkMessage::BlockTemplate { template } => template,
-        _ => return Err("Expected block template".into()),
+        NetworkMessage::Error { message } => {
+            warn!("Failed to get block template: {}", message);
+            return Err(message.into());
+        }
+        other => {
+            warn!("Expected block template, got: {:?}", other);
+            return Err("Expected block template".into());
+        }
     };
     
     // Get pending transactions (limit to 10 per block)
@@ -75,11 +83,16 @@ async fn mine_block(client: &mut NetworkClient, miner_address: &str) -> Result<(
     let pending_transactions = match client.receive_message().await? {
         NetworkMessage::PendingTransactions { transactions } => transactions,
         NetworkMessage::Transactions { transactions } => transactions,
-        _ => Vec::new(),
+        NetworkMessage::BlockTemplate { template: _ } => {
+            // Sometimes the node sends another template instead of pending transactions
+            // Just continue with empty transactions
+            Vec::new()
+        }
+        other => {
+            debug!("Unexpected response to GetPendingTransactions: {:?}", other);
+            Vec::new()
+        }
     };
-    
-    // Create a new block from the template
-    let mut block = template;
     
     // Add pending transactions to the block
     for tx in pending_transactions {
@@ -101,19 +114,21 @@ async fn mine_block(client: &mut NetworkClient, miner_address: &str) -> Result<(
           block.header.height, 
           block.transactions.len());
     
-    // Simple proof-of-work: find a nonce that makes the hash start with some zeros
+    // Improved mining algorithm
     let difficulty = block.header.difficulty as usize;
-    let _target = vec![0u8; difficulty / 8 + 1];
+    let start_time = std::time::Instant::now();
+    let mut hashes = 0u64;
     let mut rng = rand::thread_rng();
     
-    let start_time = std::time::Instant::now();
-    let mut hashes = 0;
+    // Start with a random base nonce to avoid collisions with other miners
+    let mut base_nonce: u64 = rng.gen();
+    let mut nonce_offset = 0u64;
     
     loop {
-        // Set a random nonce
-        block.header.nonce = rng.gen();
+        // Use incremental nonces with random base
+        block.header.nonce = base_nonce.wrapping_add(nonce_offset);
+        nonce_offset = nonce_offset.wrapping_add(1);
         
-        // Calculate the hash
         let hash = block.hash();
         hashes += 1;
         
@@ -121,29 +136,52 @@ async fn mine_block(client: &mut NetworkClient, miner_address: &str) -> Result<(
         if meets_difficulty(&hash, difficulty) {
             let elapsed = start_time.elapsed();
             let hash_rate = if elapsed.as_secs() > 0 {
-                hashes / elapsed.as_secs() as usize
+                hashes / elapsed.as_secs()
             } else {
                 hashes
             };
             
             info!("Found valid nonce: {}", block.header.nonce);
             info!("Block hash: {}", hex::encode(hash));
-            info!("Mined at {} hashes/sec", hash_rate);
+            info!("Mined in {:.2}s at {} hashes/sec", elapsed.as_secs_f64(), hash_rate);
             
-            // Submit the block to the node
-            client.send_message(&NetworkMessage::SubmitBlock { block }).await?;
+            // Submit the block
+            client.send_message(&NetworkMessage::SubmitBlock { block: block.clone() }).await?;
             
-            // Wait for block to be processed
-            sleep(Duration::from_millis(100)).await;
-            
-            break;
+            // Wait for response
+            match client.receive_message().await? {
+                NetworkMessage::Pong => {
+                    info!("✅ Block accepted by network! Height: {}", block.header.height);
+                    break;
+                }
+                NetworkMessage::Error { message } => {
+                    if message.contains("Stale block") || message.contains("chain has advanced") {
+                        warn!("⚠️  Block became stale during mining: {}", message);
+                        info!("Getting fresh template...");
+                        break; // Get a new template
+                    } else if message.contains("Invalid block height") {
+                        warn!("⚠️  Block height conflict: {}", message);
+                        info!("Chain moved ahead, getting new template...");
+                        break; // Get a new template
+                    } else {
+                        error!("❌ Block rejected: {}", message);
+                        // Wait a bit before retrying
+                        sleep(Duration::from_secs(2)).await;
+                        break;
+                    }
+                }
+                other => {
+                    warn!("Unexpected response to block submission: {:?}", other);
+                    break;
+                }
+            }
         }
         
-        // Report progress
+        // Progress reporting and CPU management
         if hashes % 10000 == 0 {
             let elapsed = start_time.elapsed();
             let hash_rate = if elapsed.as_secs() > 0 {
-                hashes / elapsed.as_secs() as usize
+                hashes / elapsed.as_secs()
             } else {
                 hashes
             };
@@ -151,36 +189,28 @@ async fn mine_block(client: &mut NetworkClient, miner_address: &str) -> Result<(
             debug!("Mining... {} hashes @ {} hashes/sec", hashes, hash_rate);
         }
         
-        // Avoid CPU hogging
+        // Periodically yield to avoid CPU hogging
         if hashes % 1000 == 0 {
-            sleep(Duration::from_millis(5)).await;
+            tokio::task::yield_now().await;
+        }
+        
+        // Randomize base nonce every 1M attempts to explore different spaces
+        if nonce_offset % 1_000_000 == 0 && nonce_offset > 0 {
+            let new_base: u64 = rng.gen();
+            base_nonce = new_base;
+            nonce_offset = 0;
+            debug!("Switching to new nonce space: base {}", base_nonce);
+        }
+        
+        // Check if we've been mining too long (block might be stale)
+        let current_elapsed = start_time.elapsed();
+        if current_elapsed.as_secs() > 30 {
+            warn!("⚠️  Mining taking too long ({}s), getting fresh template...", current_elapsed.as_secs());
+            break;
         }
     }
     
     Ok(())
-}
-
-fn meets_difficulty(hash: &[u8; 32], difficulty: usize) -> bool {
-    // Check if the first 'difficulty' bits are zero
-    let bytes = difficulty / 8;
-    let bits = difficulty % 8;
-    
-    // Check whole bytes
-    for i in 0..bytes {
-        if hash[i] != 0 {
-            return false;
-        }
-    }
-    
-    // Check remaining bits
-    if bits > 0 && bytes < 32 {
-        let mask = 0xFF << (8 - bits);
-        if (hash[bytes] & mask) != 0 {
-            return false;
-        }
-    }
-    
-    true
 }
 
 fn get_wallet_address(wallet_file: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
@@ -221,6 +251,6 @@ fn get_wallet_address(wallet_file: &str) -> Result<String, Box<dyn std::error::E
     }
     
     // Default address if wallet not found or invalid
-    error!("Using default address! Mining rewards may be lost!");
-    Ok("8471e37658593d6b29a10eeae54aad4d09ff9bcb".to_string()) // Replace with your address
+    warn!("Using default address! Create a proper wallet.json file.");
+    Ok("1234567890abcdef1234567890abcdef12345678".to_string())
 }

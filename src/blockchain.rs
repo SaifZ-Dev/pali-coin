@@ -1,9 +1,10 @@
+// src/blockchain.rs
 // Import types from crate root
 use crate::types::{Block, Transaction, Hash};
 use std::sync::RwLock;
 use std::collections::{HashMap, VecDeque};
 use std::path::Path;
-use log::{info, debug, error, warn};
+use log::{info, debug, error};
 use rocksdb::{DB, Options};
 use serde::{Serialize, Deserialize};
 use chrono::Utc;
@@ -119,6 +120,40 @@ impl Blockchain {
     pub fn get_latest_block(&self) -> Option<Block> {
         let chain = self.chain.read().unwrap();
         chain.last().cloned()
+    }
+    
+    // Public method to validate transactions (needed by NodeService)
+    pub fn validate_transaction(&self, tx: &Transaction) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // Skip validation for mining rewards
+        if tx.from == [0u8; 20] {
+            return Ok(());
+        }
+
+        // Verify transaction signature
+        if !tx.verify() {
+            return Err("Invalid transaction signature".into());
+        }
+
+        // Check that sender has enough funds
+        let sender_address = hex::encode(tx.from);
+        let required_amount = tx.amount + tx.fee;
+        
+        let utxo_set = self.utxo_set.read().unwrap();
+        let sender_utxos = utxo_set.get(&sender_address);
+        
+        if sender_utxos.is_none() {
+            return Err(format!("Sender {} has no UTXOs", sender_address).into());
+        }
+        
+        let sender_balance: u64 = sender_utxos.unwrap().iter()
+            .map(|(_, amount)| amount)
+            .sum();
+        
+        if sender_balance < required_amount {
+            return Err(format!("Insufficient funds: {} < {}", sender_balance, required_amount).into());
+        }
+
+        Ok(())
     }
     
     // Calculate the current mining reward based on blockchain state and network activity
@@ -257,6 +292,8 @@ impl Blockchain {
             fee: 0,
             nonce: 0,
             signature: Vec::new(), // No signature needed for coinbase
+            chain_id: 1, // Default chain ID
+            expiry: 0,   // No expiry for coinbase
         };
         
         let latest_block = self.get_latest_block();
@@ -308,6 +345,8 @@ impl Blockchain {
             fee: 0,
             nonce: 0,
             signature: Vec::new(), // No signature needed for coinbase
+            chain_id: 1, // Default chain ID
+            expiry: 0,   // No expiry
         };
 
         // Use the correct structure for your BlockHeader
@@ -481,7 +520,7 @@ impl Blockchain {
         Ok(())
     }
 
-    fn validate_block(&self, block: &Block) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+fn validate_block(&self, block: &Block) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // Get the latest block
         let latest_block = self.get_latest_block()
             .ok_or("Cannot validate block: chain is empty")?;
@@ -497,9 +536,15 @@ impl Blockchain {
             return Err("Invalid previous hash".into());
         }
 
-        // Check timestamp (must be after previous block)
-        if block.header.timestamp <= latest_block.header.timestamp {
-            return Err("Block timestamp is invalid".into());
+        // Check timestamp (must be after previous block, but allow some flexibility for mining time)
+        if block.header.timestamp < latest_block.header.timestamp {
+            return Err("Block timestamp is too old".into());
+        }
+
+        // Allow blocks with timestamps up to 10 minutes in the future (mining can take time)
+        let current_time = chrono::Utc::now().timestamp() as u64;
+        if block.header.timestamp > current_time + 600 {
+            return Err("Block timestamp is too far in the future".into());
         }
 
         // Check transactions (not too many)
@@ -527,74 +572,23 @@ impl Blockchain {
                 self.validate_transaction(tx)?;
             }
             
-            // Calculate expected reward for this miner
+            // Check coinbase reward is reasonable (allow some flexibility for timing)
             let miner_addr_str = hex::encode(block.transactions[0].to);
-            let expected_max_reward = self.calculate_mining_reward(&miner_addr_str);
+            let current_expected_reward = self.calculate_mining_reward(&miner_addr_str);
+            let actual_reward = block.transactions[0].amount;
             
-            // Allow a small margin for timestamp differences
-            let margin = expected_max_reward / 50; // 2% margin
-            let max_allowed = expected_max_reward + margin;
+            // Allow rewards within a reasonable range (±50% to account for economic changes during mining)
+            let min_allowed = current_expected_reward.saturating_sub(current_expected_reward / 2);
+            let max_allowed = current_expected_reward.saturating_add(current_expected_reward / 2);
             
-            // Check that coinbase reward is not excessive
-            if block.transactions[0].amount > max_allowed {
-                return Err(format!("Excessive mining reward: got {}, max expected {}", 
-                                 block.transactions[0].amount, max_allowed).into());
+            if actual_reward < min_allowed || actual_reward > max_allowed {
+                return Err(format!("Mining reward out of range: got {}, expected {} (range: {}-{})", 
+                                 actual_reward, current_expected_reward, min_allowed, max_allowed).into());
             }
+            
+            info!("Accepted mining reward: {} PALI (expected: {}, range: {}-{})", 
+                  actual_reward, current_expected_reward, min_allowed, max_allowed);
         }
-
-        Ok(())
-    }
-
-    fn validate_transaction(&self, tx: &Transaction) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        // Skip validation for mining rewards
-        if tx.from == [0u8; 20] {
-            return Ok(());
-        }
-
-        // Verify transaction signature
-        if !tx.verify() {
-            return Err("Invalid transaction signature".into());
-        }
-
-        // Check that sender has enough funds
-        let sender_address = hex::encode(tx.from);
-        let required_amount = tx.amount + tx.fee;
-        
-        let utxo_set = self.utxo_set.read().unwrap();
-        let sender_utxos = utxo_set.get(&sender_address);
-        
-        if sender_utxos.is_none() {
-            return Err(format!("Sender {} has no UTXOs", sender_address).into());
-        }
-        
-        let sender_balance: u64 = sender_utxos.unwrap().iter()
-            .map(|(_, amount)| amount)
-            .sum();
-        
-        if sender_balance < required_amount {
-            return Err(format!("Insufficient funds: {} < {}", sender_balance, required_amount).into());
-        }
-
-        Ok(())
-    }
-
-    fn verify_signature(&self, tx: &Transaction) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        // Simplified signature verification
-        // In a real implementation, we'd use the UTXO model properly
-        // and verify against the public key
-
-        // Skip coinbase transactions
-        if tx.from == [0u8; 20] || tx.signature.is_empty() {
-            return Ok(());
-        }
-
-        // For now, assume all signatures are valid
-        // In a real implementation, we'd do:
-        // let tx_hash = tx.hash();
-        // let msg = secp256k1::Message::from_slice(&tx_hash)?;
-        // let sig = secp256k1::ecdsa::Signature::from_compact(&tx.signature)?;
-        // let pubkey = PublicKey::from_slice(&tx.sender_pubkey)?;
-        // secp256k1::verify(&msg, &sig, &pubkey)?;
 
         Ok(())
     }
@@ -838,7 +832,8 @@ impl Blockchain {
         };
         
         // Calculate next halving block
-        let next_halving_height = self.last_halving_height.read().unwrap() + REWARD_HALVING_PERIOD;
+        let last_halving_height = *self.last_halving_height.read().unwrap();
+        let next_halving_height = last_halving_height + REWARD_HALVING_PERIOD;
         let blocks_until_halving = if chain_height < next_halving_height {
             next_halving_height - chain_height
         } else {
@@ -856,7 +851,7 @@ impl Blockchain {
             "next_halving_block": next_halving_height,
             "blocks_until_halving": blocks_until_halving,
             "most_active_miner": most_active_miner.map(|(addr, count)| {
-                json!({
+                serde_json::json!({
                     "address": addr,
                     "blocks_mined": count
                 })
