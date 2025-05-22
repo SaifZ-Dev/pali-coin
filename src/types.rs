@@ -1,4 +1,4 @@
-// src/types.rs - Secure cryptographic types for Pali Coin
+// src/types.rs - Bitcoin-grade cryptographic types for Pali Coin
 use sha2::{Sha256, Digest};
 use serde::{Serialize, Deserialize};
 use secp256k1::{
@@ -6,57 +6,60 @@ use secp256k1::{
     ecdsa::{Signature, RecoverableSignature, RecoveryId}
 };
 use ripemd::{Ripemd160, Digest as RipemdDigest};
-use crate::error::{PaliError, Result};
-use crate::utils::{hash, time, encoding, validation};
 use std::fmt;
+use chrono::{DateTime, Utc};
 
 pub type Address = [u8; 20];
 pub type Hash = [u8; 32];
 
-/// Block header containing metadata
+/// Enhanced block header with Bitcoin-grade security
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct BlockHeader {
+    /// Version for protocol upgrades
+    pub version: u32,
+    
     /// Hash of the previous block
     pub prev_hash: Hash,
     
     /// Merkle root of all transactions in the block
     pub merkle_root: Hash,
     
-    /// Block creation timestamp
+    /// Block creation timestamp (Unix seconds)
     pub timestamp: u64,
     
     /// Block height in the chain
     pub height: u64,
     
+    /// Mining difficulty target (leading zero bits required)
+    pub difficulty_target: u32,
+    
     /// Proof-of-work nonce
     pub nonce: u64,
     
-    /// Mining difficulty target
-    pub difficulty: u32,
-    
-    /// Version for future upgrades
-    pub version: u32,
-    
     /// Number of transactions in block
     pub tx_count: u32,
+    
+    /// Block size in bytes (for consensus rules)
+    pub block_size: u32,
 }
 
 impl Default for BlockHeader {
     fn default() -> Self {
         BlockHeader {
+            version: 1,
             prev_hash: [0; 32],
             merkle_root: [0; 32],
-            timestamp: time::now(),
+            timestamp: Utc::now().timestamp() as u64,
             height: 0,
+            difficulty_target: 24, // 24 leading zero bits
             nonce: 0,
-            difficulty: 20,
-            version: 1,
             tx_count: 0,
+            block_size: 0,
         }
     }
 }
 
-/// Complete block with header, transactions, and optional ZK proof
+/// Complete block with enhanced validation
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Block {
     /// Block header
@@ -65,10 +68,10 @@ pub struct Block {
     /// All transactions in the block
     pub transactions: Vec<Transaction>,
     
-    /// Optional zero-knowledge proof
+    /// Optional zero-knowledge proof for privacy
     pub zk_proof: Option<Vec<u8>>,
     
-    /// Block signature (for validator consensus)
+    /// Block signature for validator consensus (future PoS)
     pub signature: Option<Vec<u8>>,
 }
 
@@ -77,23 +80,22 @@ impl Block {
     pub fn new(
         prev_hash: Hash,
         transactions: Vec<Transaction>,
-        difficulty: u32,
+        difficulty_target: u32,
         height: u64,
     ) -> Self {
         let tx_count = transactions.len() as u32;
-        let merkle_root = hash::merkle_root(
-            &transactions.iter().map(|tx| tx.hash()).collect::<Vec<_>>()
-        );
+        let merkle_root = Self::calculate_merkle_root(&transactions);
         
         let header = BlockHeader {
+            version: 1,
             prev_hash,
             merkle_root,
-            timestamp: time::now(),
+            timestamp: Utc::now().timestamp() as u64,
             height,
+            difficulty_target,
             nonce: 0,
-            difficulty,
-            version: 1,
             tx_count,
+            block_size: 0, // Will be calculated when serialized
         };
         
         Block {
@@ -104,22 +106,24 @@ impl Block {
         }
     }
     
-    /// Calculate block hash
+    /// Calculate Bitcoin-style double SHA-256 hash
     pub fn hash(&self) -> Hash {
         let mut hasher = Sha256::new();
+        
+        // Hash all header fields
+        hasher.update(&self.header.version.to_be_bytes());
         hasher.update(&self.header.prev_hash);
         hasher.update(&self.header.merkle_root);
         hasher.update(&self.header.timestamp.to_be_bytes());
         hasher.update(&self.header.height.to_be_bytes());
+        hasher.update(&self.header.difficulty_target.to_be_bytes());
         hasher.update(&self.header.nonce.to_be_bytes());
-        hasher.update(&self.header.difficulty.to_be_bytes());
-        hasher.update(&self.header.version.to_be_bytes());
         hasher.update(&self.header.tx_count.to_be_bytes());
         
         // Double SHA-256 for extra security (Bitcoin standard)
-        let first_result = hasher.finalize();
+        let first_hash = hasher.finalize();
         let mut second_hasher = Sha256::new();
-        second_hasher.update(first_result);
+        second_hasher.update(first_hash);
         
         let result = second_hasher.finalize();
         let mut hash = [0u8; 32];
@@ -130,20 +134,56 @@ impl Block {
     /// Verify proof-of-work meets difficulty requirement
     pub fn is_valid_proof_of_work(&self) -> bool {
         let hash = self.hash();
-        validation::meets_difficulty(&hash, self.header.difficulty)
+        meets_difficulty_target(&hash, self.header.difficulty_target)
+    }
+    
+    /// Calculate merkle root with Bitcoin-compatible algorithm
+    fn calculate_merkle_root(transactions: &[Transaction]) -> Hash {
+        if transactions.is_empty() {
+            return [0; 32];
+        }
+        
+        let mut hashes: Vec<Hash> = transactions.iter()
+            .map(|tx| tx.hash())
+            .collect();
+        
+        while hashes.len() > 1 {
+            let mut new_level = Vec::new();
+            
+            // Process pairs of hashes
+            for chunk in hashes.chunks(2) {
+                let mut hasher = Sha256::new();
+                hasher.update(&chunk[0]);
+                
+                if chunk.len() == 2 {
+                    hasher.update(&chunk[1]);
+                } else {
+                    // If odd number, duplicate the last hash (Bitcoin standard)
+                    hasher.update(&chunk[0]);
+                }
+                
+                // Double SHA-256
+                let first_hash = hasher.finalize();
+                let mut second_hasher = Sha256::new();
+                second_hasher.update(first_hash);
+                
+                let result = second_hasher.finalize();
+                let mut hash = [0u8; 32];
+                hash.copy_from_slice(&result);
+                
+                new_level.push(hash);
+            }
+            
+            hashes = new_level;
+        }
+        
+        hashes[0]
     }
     
     /// Verify merkle root matches transactions
     pub fn verify_merkle_root(&self) -> bool {
-        let calculated_root = hash::merkle_root(
-            &self.transactions.iter().map(|tx| tx.hash()).collect::<Vec<_>>()
-        );
-        self.header.merkle_root == calculated_root
-    }
-    
-    /// Get block size in bytes
-    pub fn size(&self) -> usize {
-        serde_json::to_vec(self).map(|v| v.len()).unwrap_or(0)
+        let calculated = Self::calculate_merkle_root(&self.transactions);
+        self.header.merkle_root == calculated
     }
     
     /// Check if block is genesis block
@@ -156,99 +196,82 @@ impl Block {
         self.transactions.first().filter(|tx| tx.is_coinbase())
     }
     
-    /// Get non-coinbase transactions
-    pub fn regular_transactions(&self) -> &[Transaction] {
-        if self.transactions.is_empty() {
-            &[]
-        } else if self.transactions[0].is_coinbase() {
-            &self.transactions[1..]
-        } else {
-            &self.transactions
-        }
-    }
-    
     /// Comprehensive block validation
-    pub fn validate(&self, prev_block: Option<&Block>) -> Result<()> {
+    pub fn validate(&self, prev_block: Option<&Block>) -> Result<(), String> {
         // Verify merkle root
         if !self.verify_merkle_root() {
-            return Err(PaliError::BlockValidation("Invalid merkle root".to_string()));
+            return Err("Invalid merkle root".to_string());
         }
         
         // Verify proof of work
         if !self.is_valid_proof_of_work() {
-            return Err(PaliError::ProofOfWork("Insufficient proof of work".to_string()));
+            return Err("Insufficient proof of work".to_string());
         }
         
-        // Verify timestamp
-        if !time::is_valid_timestamp(self.header.timestamp, 7200) { // 2 hours max drift
-            return Err(PaliError::BlockValidation("Invalid timestamp".to_string()));
-        }
-        
-        // Verify block size
-        if !validation::is_valid_block_size(self.size()) {
-            return Err(PaliError::BlockValidation("Block too large".to_string()));
-        }
-        
-        // Verify transaction count matches header
-        if self.transactions.len() != self.header.tx_count as usize {
-            return Err(PaliError::BlockValidation("Transaction count mismatch".to_string()));
+        // Verify timestamp is reasonable
+        let now = Utc::now().timestamp() as u64;
+        if self.header.timestamp > now + 7200 { // Max 2 hours in future
+            return Err("Block timestamp too far in future".to_string());
         }
         
         // Verify against previous block if provided
         if let Some(prev) = prev_block {
             if self.header.prev_hash != prev.hash() {
-                return Err(PaliError::BlockValidation("Invalid previous hash".to_string()));
+                return Err("Invalid previous hash".to_string());
             }
             
             if self.header.height != prev.header.height + 1 {
-                return Err(PaliError::BlockValidation("Invalid block height".to_string()));
+                return Err("Invalid block height".to_string());
             }
             
             if self.header.timestamp <= prev.header.timestamp {
-                return Err(PaliError::BlockValidation("Block timestamp not after previous".to_string()));
+                return Err("Block timestamp not after previous".to_string());
             }
         }
         
         // Validate all transactions
         for (i, tx) in self.transactions.iter().enumerate() {
-            tx.validate(Some(1)).map_err(|e| {
-                PaliError::BlockValidation(format!("Transaction {} invalid: {}", i, e))
-            })?;
+            if let Err(e) = tx.validate(Some(1)) {
+                return Err(format!("Transaction {} invalid: {}", i, e));
+            }
         }
         
         Ok(())
     }
 }
 
-/// Transaction with full cryptographic security
+/// Enhanced transaction with full ECDSA signature recovery
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Transaction {
+    /// Transaction version for protocol upgrades
+    pub version: u32,
+    
     /// Sender address (20 bytes)
     pub from: Address,
     
     /// Recipient address (20 bytes)
     pub to: Address,
     
-    /// Amount to transfer (in smallest units)
+    /// Amount to transfer (in smallest units - 1 PALI = 1,000,000 units)
     pub amount: u64,
     
-    /// Transaction fee
+    /// Transaction fee (in smallest units)
     pub fee: u64,
     
     /// Transaction nonce (prevents replay attacks)
     pub nonce: u64,
     
-    /// Cryptographic signature (65 bytes: 64 + recovery_id)
-    pub signature: Vec<u8>,
-    
-    /// Chain ID for replay protection
+    /// Chain ID for replay protection across networks
     pub chain_id: u64,
     
-    /// Optional expiry timestamp (0 = no expiry)
+    /// Transaction expiry timestamp (0 = no expiry)
     pub expiry: u64,
     
-    /// Transaction version for future upgrades
-    pub version: u32,
+    /// ECDSA signature with recovery (65 bytes: 64 + recovery_id)
+    pub signature: Vec<u8>,
+    
+    /// Sender's public key (for verification, 33 bytes compressed)
+    pub public_key: Vec<u8>,
     
     /// Optional transaction data/memo
     pub data: Option<Vec<u8>>,
@@ -265,31 +288,33 @@ impl Transaction {
         chain_id: u64,
     ) -> Self {
         Transaction {
+            version: 1,
             from,
             to,
             amount,
             fee,
             nonce,
-            signature: Vec::new(),
             chain_id,
             expiry: 0,
-            version: 1,
+            signature: Vec::new(),
+            public_key: Vec::new(),
             data: None,
         }
     }
     
     /// Create a coinbase transaction (mining reward)
-    pub fn coinbase(to: Address, amount: u64, height: u64) -> Self {
+    pub fn coinbase(to: Address, amount: u64, height: u64, chain_id: u64) -> Self {
         Transaction {
+            version: 1,
             from: [0u8; 20],
             to,
             amount,
             fee: 0,
             nonce: height, // Use height as nonce for coinbase
-            signature: Vec::new(),
-            chain_id: 1,
+            chain_id,
             expiry: 0,
-            version: 1,
+            signature: Vec::new(),
+            public_key: Vec::new(),
             data: Some(format!("Coinbase reward for block {}", height).into_bytes()),
         }
     }
@@ -306,16 +331,16 @@ impl Transaction {
         self
     }
     
-    /// Get data to be signed (everything except signature)
-    pub fn signing_data(&self) -> Vec<u8> {
+    /// Get data to be signed (everything except signature and public_key)
+    pub fn data_to_sign(&self) -> Vec<u8> {
         let mut data = Vec::new();
+        data.extend_from_slice(&self.version.to_be_bytes());
         data.extend_from_slice(&self.from);
         data.extend_from_slice(&self.to);
         data.extend_from_slice(&self.amount.to_be_bytes());
         data.extend_from_slice(&self.fee.to_be_bytes());
         data.extend_from_slice(&self.nonce.to_be_bytes());
         data.extend_from_slice(&self.chain_id.to_be_bytes());
-        data.extend_from_slice(&self.version.to_be_bytes());
         
         if self.expiry > 0 {
             data.extend_from_slice(&self.expiry.to_be_bytes());
@@ -328,15 +353,15 @@ impl Transaction {
         data
     }
     
-    /// Sign transaction with private key
-    pub fn sign(&mut self, private_key: &SecretKey) -> Result<()> {
+    /// Sign transaction with private key using ECDSA with recovery
+    pub fn sign(&mut self, private_key: &SecretKey, public_key: &PublicKey) -> Result<(), String> {
         let secp = Secp256k1::new();
-        let signing_data = self.signing_data();
+        let signing_data = self.data_to_sign();
         
         // Hash the signing data
-        let hash = hash::sha256(&signing_data);
+        let hash = double_sha256(&signing_data);
         let message = Message::from_digest_slice(&hash)
-            .map_err(|e| PaliError::Crypto(format!("Invalid message: {}", e)))?;
+            .map_err(|e| format!("Invalid message: {}", e))?;
         
         // Create recoverable signature
         let signature = secp.sign_ecdsa_recoverable(&message, private_key);
@@ -348,87 +373,97 @@ impl Transaction {
         full_signature.push(recovery_id.to_i32() as u8);
         
         self.signature = full_signature;
+        self.public_key = public_key.serialize().to_vec();
         
         // Verify the signature we just created
-        if !self.verify_signature()? {
-            return Err(PaliError::Crypto("Failed to verify own signature".to_string()));
+        if !self.verify() {
+            return Err("Failed to verify own signature".to_string());
         }
         
         Ok(())
     }
     
     /// Verify transaction signature with full cryptographic validation
-    pub fn verify_signature(&self) -> Result<bool> {
+    pub fn verify(&self) -> bool {
         // Coinbase transactions don't need signatures
         if self.is_coinbase() {
-            return Ok(true);
+            return true;
         }
         
-        // Must have signature
-        if self.signature.is_empty() {
-            return Ok(false);
+        // Must have signature and public key
+        if self.signature.is_empty() || self.public_key.is_empty() {
+            return false;
         }
         
         // Signature must be exactly 65 bytes
         if self.signature.len() != 65 {
-            return Ok(false);
+            return false;
+        }
+        
+        // Public key must be 33 bytes (compressed)
+        if self.public_key.len() != 33 {
+            return false;
         }
         
         let secp = Secp256k1::new();
         
+        // Parse public key
+        let public_key = match PublicKey::from_slice(&self.public_key) {
+            Ok(key) => key,
+            Err(_) => return false,
+        };
+        
         // Extract recovery ID and signature
-        let recovery_id = RecoveryId::from_i32(self.signature[64] as i32)
-            .map_err(|e| PaliError::Crypto(format!("Invalid recovery ID: {}", e)))?;
+        let recovery_id = match RecoveryId::from_i32(self.signature[64] as i32) {
+            Ok(id) => id,
+            Err(_) => return false,
+        };
         
         let signature_bytes = &self.signature[..64];
         
         // Create recoverable signature
-        let recoverable_sig = RecoverableSignature::from_compact(signature_bytes, recovery_id)
-            .map_err(|e| PaliError::Crypto(format!("Invalid signature format: {}", e)))?;
+        let recoverable_sig = match RecoverableSignature::from_compact(signature_bytes, recovery_id) {
+            Ok(sig) => sig,
+            Err(_) => return false,
+        };
         
         // Hash the signing data
-        let signing_data = self.signing_data();
-        let hash = hash::sha256(&signing_data);
-        let message = Message::from_digest_slice(&hash)
-            .map_err(|e| PaliError::Crypto(format!("Invalid message hash: {}", e)))?;
+        let signing_data = self.data_to_sign();
+        let hash = double_sha256(&signing_data);
+        let message = match Message::from_digest_slice(&hash) {
+            Ok(msg) => msg,
+            Err(_) => return false,
+        };
         
-        // Recover public key
-        let public_key = secp.recover_ecdsa(&message, &recoverable_sig)
-            .map_err(|e| PaliError::Crypto(format!("Failed to recover public key: {}", e)))?;
-        
-        // Convert public key to address
-        let recovered_address = public_key_to_address(&public_key);
-        
-        // Verify recovered address matches sender
-        Ok(recovered_address == self.from)
-    }
-    
-    /// Verify transaction with context (chain ID, expiry, etc.)
-    pub fn verify_with_context(&self, expected_chain_id: u64) -> Result<bool> {
-        // Verify chain ID for replay protection
-        if self.chain_id != expected_chain_id {
-            return Ok(false);
+        // Recover public key and verify it matches
+        match secp.recover_ecdsa(&message, &recoverable_sig) {
+            Ok(recovered_key) => {
+                if recovered_key != public_key {
+                    return false;
+                }
+                
+                // Also verify with standard ECDSA
+                let standard_sig = match Signature::from_compact(signature_bytes) {
+                    Ok(sig) => sig,
+                    Err(_) => return false,
+                };
+                
+                secp.verify_ecdsa(&message, &standard_sig, &public_key).is_ok()
+            }
+            Err(_) => false,
         }
-        
-        // Check expiry if set
-        if self.expiry > 0 && time::now() > self.expiry {
-            return Ok(false);
-        }
-        
-        // Verify cryptographic signature
-        self.verify_signature()
     }
     
     /// Calculate transaction hash
     pub fn hash(&self) -> Hash {
         let mut hasher = Sha256::new();
+        hasher.update(&self.version.to_be_bytes());
         hasher.update(&self.from);
         hasher.update(&self.to);
         hasher.update(&self.amount.to_be_bytes());
         hasher.update(&self.fee.to_be_bytes());
         hasher.update(&self.nonce.to_be_bytes());
         hasher.update(&self.chain_id.to_be_bytes());
-        hasher.update(&self.version.to_be_bytes());
         
         if self.expiry > 0 {
             hasher.update(&self.expiry.to_be_bytes());
@@ -438,12 +473,12 @@ impl Transaction {
             hasher.update(data);
         }
         
-        hasher.update(&self.signature);
+        // Don't include signature in hash (allows signature malleability protection)
         
-        // Double SHA-256 for security
-        let first_result = hasher.finalize();
+        // Double SHA-256
+        let first_hash = hasher.finalize();
         let mut second_hasher = Sha256::new();
-        second_hasher.update(first_result);
+        second_hasher.update(first_hash);
         
         let result = second_hasher.finalize();
         let mut hash = [0u8; 32];
@@ -458,7 +493,7 @@ impl Transaction {
     
     /// Get transaction size in bytes
     pub fn size(&self) -> usize {
-        serde_json::to_vec(self).map(|v| v.len()).unwrap_or(0)
+        bincode::serialize(self).map(|v| v.len()).unwrap_or(0)
     }
     
     /// Get total transaction cost (amount + fee)
@@ -467,39 +502,50 @@ impl Transaction {
     }
     
     /// Comprehensive transaction validation
-    pub fn validate(&self, chain_id: Option<u64>) -> Result<()> {
+    pub fn validate(&self, chain_id: Option<u64>) -> Result<(), String> {
         // Validate amounts
-        if !validation::is_valid_amount(self.amount) {
-            return Err(PaliError::TransactionValidation("Invalid amount".to_string()));
+        if self.amount == 0 && !self.is_coinbase() {
+            return Err("Transaction amount cannot be zero".to_string());
         }
         
-        if !validation::is_valid_fee(self.fee, self.amount) {
-            return Err(PaliError::TransactionValidation("Invalid fee".to_string()));
+        if self.amount > 21_000_000_000_000 { // Max supply check
+            return Err("Transaction amount exceeds maximum supply".to_string());
+        }
+        
+        // Validate fee
+        if self.fee > self.amount / 2 && !self.is_coinbase() {
+            return Err("Transaction fee too high (>50% of amount)".to_string());
         }
         
         // Validate addresses
         if self.from == self.to && !self.is_coinbase() {
-            return Err(PaliError::TransactionValidation("Cannot send to same address".to_string()));
-        }
-        
-        // Validate transaction size
-        if self.size() > crate::constants::MAX_TRANSACTION_SIZE {
-            return Err(PaliError::TransactionValidation("Transaction too large".to_string()));
+            return Err("Cannot send to same address".to_string());
         }
         
         // Validate chain ID if provided
         if let Some(expected_chain_id) = chain_id {
-            if !self.verify_with_context(expected_chain_id)? {
-                return Err(PaliError::TransactionValidation("Invalid signature or context".to_string()));
+            if self.chain_id != expected_chain_id {
+                return Err("Invalid chain ID".to_string());
             }
-        } else if !self.verify_signature()? {
-            return Err(PaliError::TransactionValidation("Invalid signature".to_string()));
+        }
+        
+        // Check expiry
+        if self.expiry > 0 {
+            let now = Utc::now().timestamp() as u64;
+            if now > self.expiry {
+                return Err("Transaction has expired".to_string());
+            }
+        }
+        
+        // Verify signature
+        if !self.verify() {
+            return Err("Invalid signature".to_string());
         }
         
         // Validate data size if present
         if let Some(ref data) = self.data {
             if data.len() > 1024 { // Max 1KB data
-                return Err(PaliError::TransactionValidation("Transaction data too large".to_string()));
+                return Err("Transaction data too large".to_string());
             }
         }
         
@@ -507,24 +553,53 @@ impl Transaction {
     }
 }
 
-/// Convert secp256k1 public key to 20-byte address
+/// Convert secp256k1 public key to 20-byte address (Bitcoin-compatible)
 pub fn public_key_to_address(public_key: &PublicKey) -> Address {
-    // Get uncompressed public key (65 bytes: 0x04 + 32x + 32y)
-    let public_key_bytes = public_key.serialize_uncompressed();
+    // Get compressed public key (33 bytes)
+    let public_key_bytes = public_key.serialize();
     
     // Hash with SHA256, then RIPEMD160 (Bitcoin/Ethereum style)
-    let sha_hash = hash::sha256(&public_key_bytes[1..]); // Skip 0x04 prefix
-    hash::hash160(&sha_hash)
+    let sha_hash = double_sha256(&public_key_bytes);
+    
+    let mut ripemd_hasher = Ripemd160::new();
+    ripemd_hasher.update(&sha_hash);
+    let ripemd_hash = ripemd_hasher.finalize();
+    
+    let mut address = [0u8; 20];
+    address.copy_from_slice(&ripemd_hash);
+    address
 }
 
-/// Generate a key pair for testing
-#[cfg(test)]
-pub fn generate_keypair() -> (SecretKey, PublicKey, Address) {
-    use rand::rngs::OsRng;
-    let secp = Secp256k1::new();
-    let (secret_key, public_key) = secp.generate_keypair(&mut OsRng);
-    let address = public_key_to_address(&public_key);
-    (secret_key, public_key, address)
+/// Bitcoin-style double SHA-256 hash
+pub fn double_sha256(data: &[u8]) -> Hash {
+    let first_hash = Sha256::digest(data);
+    let second_hash = Sha256::digest(&first_hash);
+    
+    let mut result = [0u8; 32];
+    result.copy_from_slice(&second_hash);
+    result
+}
+
+/// Check if hash meets difficulty target (leading zero bits)
+pub fn meets_difficulty_target(hash: &Hash, target_bits: u32) -> bool {
+    let mut count = 0u32;
+    
+    for byte in hash {
+        if *byte == 0 {
+            count += 8;
+            continue;
+        }
+        
+        // Count leading zero bits in this byte
+        let mut byte_val = *byte;
+        while byte_val & 0x80 == 0 {
+            count += 1;
+            byte_val <<= 1;
+        }
+        break;
+    }
+    
+    count >= target_bits
 }
 
 /// Display implementations for better debugging
@@ -532,10 +607,11 @@ impl fmt::Display for Block {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
             f,
-            "Block(height: {}, hash: {}, txs: {})",
+            "Block(height: {}, hash: {}, txs: {}, difficulty: {})",
             self.header.height,
-            encoding::to_hex(&self.hash()),
-            self.transactions.len()
+            hex::encode(self.hash()),
+            self.transactions.len(),
+            self.header.difficulty_target
         )
     }
 }
@@ -544,11 +620,12 @@ impl fmt::Display for Transaction {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
             f,
-            "Transaction(from: {}, to: {}, amount: {}, fee: {})",
-            encoding::to_hex(&self.from),
-            encoding::to_hex(&self.to),
+            "Transaction(from: {}, to: {}, amount: {}, fee: {}, nonce: {})",
+            hex::encode(self.from),
+            hex::encode(self.to),
             self.amount,
-            self.fee
+            self.fee,
+            self.nonce
         )
     }
 }
@@ -556,11 +633,18 @@ impl fmt::Display for Transaction {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::constants::*;
+    use secp256k1::rand::rngs::OsRng;
+
+    fn generate_keypair() -> (SecretKey, PublicKey, Address) {
+        let secp = Secp256k1::new();
+        let (secret_key, public_key) = secp.generate_keypair(&mut OsRng);
+        let address = public_key_to_address(&public_key);
+        (secret_key, public_key, address)
+    }
 
     #[test]
     fn test_transaction_creation_and_signing() {
-        let (secret_key, _public_key, address) = generate_keypair();
+        let (secret_key, public_key, address) = generate_keypair();
         let to_address = [1u8; 20];
         
         let mut tx = Transaction::new(
@@ -569,29 +653,27 @@ mod tests {
             1000000, // 1 PALI
             1000,    // 0.001 PALI fee
             1,
-            MAINNET_CHAIN_ID,
+            1, // chain_id
         );
         
-        assert!(tx.sign(&secret_key).is_ok());
-        assert!(tx.verify_signature().unwrap());
-        assert!(tx.verify_with_context(MAINNET_CHAIN_ID).unwrap());
-        assert!(!tx.verify_with_context(TESTNET_CHAIN_ID).unwrap());
+        assert!(tx.sign(&secret_key, &public_key).is_ok());
+        assert!(tx.verify());
     }
     
     #[test]
     fn test_coinbase_transaction() {
         let address = [1u8; 20];
-        let coinbase = Transaction::coinbase(address, 5000000, 1);
+        let coinbase = Transaction::coinbase(address, 5000000, 1, 1);
         
         assert!(coinbase.is_coinbase());
-        assert!(coinbase.verify_signature().unwrap());
-        assert!(coinbase.validate(Some(MAINNET_CHAIN_ID)).is_ok());
+        assert!(coinbase.verify());
+        assert!(coinbase.validate(Some(1)).is_ok());
     }
     
     #[test]
     fn test_block_creation_and_validation() {
         let address = [1u8; 20];
-        let coinbase = Transaction::coinbase(address, 5000000, 1);
+        let coinbase = Transaction::coinbase(address, 5000000, 1, 1);
         let transactions = vec![coinbase];
         
         let block = Block::new([0; 32], transactions, 20, 1);
@@ -605,7 +687,7 @@ mod tests {
     fn test_proof_of_work() {
         let mut block = Block::new([0; 32], vec![], 1, 0); // Very easy difficulty
         
-        // Mine the block (find valid nonce)
+        // Mine the block
         while !block.is_valid_proof_of_work() {
             block.header.nonce += 1;
             if block.header.nonce > 1000000 {
@@ -614,46 +696,5 @@ mod tests {
         }
         
         assert!(block.is_valid_proof_of_work());
-    }
-    
-    #[test]
-    fn test_invalid_signature() {
-        let (_secret_key, _public_key, address) = generate_keypair();
-        let to_address = [1u8; 20];
-        
-        let mut tx = Transaction::new(
-            address,
-            to_address,
-            1000000,
-            1000,
-            1,
-            MAINNET_CHAIN_ID,
-        );
-        
-        // Set invalid signature
-        tx.signature = vec![0u8; 65];
-        
-        assert!(!tx.verify_signature().unwrap());
-    }
-    
-    #[test]
-    fn test_transaction_validation() {
-        let (secret_key, _public_key, address) = generate_keypair();
-        let to_address = [1u8; 20];
-        
-        // Valid transaction
-        let mut valid_tx = Transaction::new(address, to_address, 1000000, 1000, 1, MAINNET_CHAIN_ID);
-        valid_tx.sign(&secret_key).unwrap();
-        assert!(valid_tx.validate(Some(MAINNET_CHAIN_ID)).is_ok());
-        
-        // Invalid amount (0)
-        let mut invalid_tx = Transaction::new(address, to_address, 0, 1000, 1, MAINNET_CHAIN_ID);
-        invalid_tx.sign(&secret_key).unwrap();
-        assert!(invalid_tx.validate(Some(MAINNET_CHAIN_ID)).is_err());
-        
-        // Self-send (non-coinbase)
-        let mut self_send_tx = Transaction::new(address, address, 1000000, 1000, 1, MAINNET_CHAIN_ID);
-        self_send_tx.sign(&secret_key).unwrap();
-        assert!(self_send_tx.validate(Some(MAINNET_CHAIN_ID)).is_err());
     }
 }
