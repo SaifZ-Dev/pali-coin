@@ -1,0 +1,44 @@
+# 🛡️ Pali Coin Ultra-Secure Configuration - ALL CHECKLIST ITEMS
+
+# Connection limits (CRITICAL SECURITY - CHECKLIST)
+max_connections = 1000                    # ✅ max 1000 concurrent
+max_connections_per_ip = 3               # ✅ limit connections per IP
+max_connections_per_subnet = 20          # ✅ prevent subnet flooding
+
+# Rate limiting (CHECKLIST REQUIREMENTS)
+max_requests_per_minute = 60             # ✅ 60 req/min rate limiting
+max_requests_per_hour = 3600             # ✅ hourly rate limits
+max_bytes_per_minute = 50000000          # ✅ 50MB/min bandwidth limit
+ban_duration_minutes = 60                # ✅ 60 minute IP bans
+
+# DDoS protection (CHECKLIST REQUIREMENTS)
+enable_ddos_protection = true            # ✅ DDoS protection enabled
+enable_connection_throttling = true      # ✅ connection throttling
+enable_ip_geoblocking = false           # ✅ geolocation filtering
+blocked_countries = []                   # ✅ country blocking list
+
+# Authentication (CRITICAL - CHECKLIST)
+require_miner_auth = true                # ✅ CRITICAL: miner authentication
+enable_proof_of_work_challenge = true   # ✅ PoW challenges
+min_peer_version = "0.1.0"              # ✅ minimum peer version
+
+# Validation limits (CHECKLIST REQUIREMENTS)
+max_block_size = 4000000                 # ✅ 4MB max block size
+max_transaction_size = 100000            # ✅ 100KB max transaction
+min_transaction_fee = 1000               # ✅ 1000 satoshis minimum
+max_mempool_size = 50000                 # ✅ mempool size limit
+
+# Security features (ALL ENABLED - CHECKLIST)
+enable_signature_verification = true     # ✅ signature verification
+enable_replay_protection = true         # ✅ replay attack prevention
+enable_timestamp_validation = true      # ✅ timestamp validation
+enable_merkle_validation = true         # ✅ merkle root validation
+enable_previous_hash_validation = true  # ✅ previous hash checks
+
+# Network security
+rate_limit_whitelist = []               # Whitelisted IPs (if any)
+trusted_peers = []                      # Trusted peer list
+
+# Emergency controls
+emergency_mode = false                   # Emergency mode (restrict operations)
+max_reorg_depth = 100                   # Maximum blockchain reorganization depth

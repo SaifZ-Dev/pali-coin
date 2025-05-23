@@ -1,4 +1,4 @@
-// src/blockchain.rs - Enterprise-grade blockchain with Bitcoin-level security
+/// src/blockchain.rs - Enterprise-grade blockchain with Bitcoin-level security
 use crate::types::{Block, BlockHeader, Transaction, Hash, Address, meets_difficulty_target, double_sha256};
 use std::collections::{HashMap, VecDeque, HashSet};
 use std::sync::{Arc, RwLock, Mutex};
@@ -296,9 +296,9 @@ impl Blockchain {
         let cf = db.cf_handle(CF_CHAINSTATE)
             .ok_or("Missing chainstate column family")?;
         
-        match db.get_cf(cf, b"chain_state")? {
+        match db.get_cf(cf, b"chain_state").map_err(|e| e.to_string())? {
             Some(data) => {
-                let state: ChainState = bincode::deserialize(&data)?;
+                let state: ChainState = bincode::deserialize(&data).map_err(|e| e.to_string())?;
                 info!("Loaded existing chain state - Height: {}", state.best_block_height);
                 Ok(state)
             }
@@ -326,7 +326,7 @@ impl Blockchain {
             .ok_or("Missing chainstate column family")?;
         
         let serialized = bincode::serialize(&*state)?;
-        self.db.put_cf(cf, b"chain_state", &serialized)?;
+        self.db.put_cf(cf, b"chain_state", &serialized).map_err(|e| e.to_string())?;
         Ok(())
     }
     
@@ -335,7 +335,7 @@ impl Blockchain {
         let cf = self.db.cf_handle(CF_UTXOS)
             .ok_or("Missing UTXOS column family")?;
         
-        let iter = self.db.iterator_cf(cf, IteratorMode::Start);
+        let iter = self.db.iterator_cf(&cf, IteratorMode::Start);
         let mut utxo_set = self.utxo_set.write().unwrap();
         let mut count = 0;
         
@@ -504,7 +504,7 @@ impl Blockchain {
         }
         
         // Check if transaction is already in a block
-        if self.transaction_exists(&tx.hash())? {
+        if self.transaction_exists(&tx.hash()).map_err(|e| e.to_string())? {
             return Err("Transaction already exists in blockchain".to_string());
         }
         
@@ -726,7 +726,7 @@ impl Blockchain {
                 
                 for key in utxos_to_remove {
                     utxo_set.remove(&key);
-                    self.db.delete_cf(cf, key.as_bytes())?;
+                    self.db.delete_cf(cf, key.as_bytes()).map_err(|e| e.to_string())?;
                 }
                 
                 // Create change UTXO if necessary
@@ -745,7 +745,7 @@ impl Blockchain {
                     let key = format!("{}:{}", hex::encode(tx_hash), 0);
                     let serialized = bincode::serialize(&change_utxo)?;
                     utxo_set.insert(key.clone(), change_utxo);
-                    self.db.put_cf(cf, key.as_bytes(), &serialized)?;
+                    self.db.put_cf(cf, key.as_bytes(), &serialized).map_err(|e| e.to_string())?;
                 }
             }
             
@@ -763,7 +763,7 @@ impl Blockchain {
             let key = format!("{}:{}", hex::encode(tx_hash), 1);
             let serialized = bincode::serialize(&recipient_utxo)?;
             utxo_set.insert(key.clone(), recipient_utxo);
-            self.db.put_cf(cf, key.as_bytes(), &serialized)?;
+            self.db.put_cf(cf, key.as_bytes(), &serialized).map_err(|e| e.to_string())?;
         }
         
         Ok(())
@@ -778,11 +778,11 @@ impl Blockchain {
         let serialized = bincode::serialize(block)?;
         
         // Save by hash
-        self.db.put_cf(cf, &block_hash, &serialized)?;
+        self.db.put_cf(cf, &block_hash, &serialized).map_err(|e| e.to_string())?;
         
         // Save by height for easier lookup
         let height_key = format!("height:{}", block.header.height);
-        self.db.put_cf(cf, height_key.as_bytes(), &block_hash)?;
+        self.db.put_cf(cf, height_key.as_bytes(), &block_hash).map_err(|e| e.to_string())?;
         
         // Save each transaction
         let tx_cf = self.db.cf_handle(CF_TRANSACTIONS)
@@ -791,7 +791,7 @@ impl Blockchain {
         for tx in &block.transactions {
             let tx_hash = tx.hash();
             let tx_serialized = bincode::serialize(tx)?;
-            self.db.put_cf(tx_cf, &tx_hash, &tx_serialized)?;
+            self.db.put_cf(tx_cf, &tx_hash, &tx_serialized).map_err(|e| e.to_string())?;
         }
         
         Ok(())
@@ -811,7 +811,7 @@ impl Blockchain {
         let cf = self.db.cf_handle(CF_BLOCKS)
             .ok_or("Missing blocks column family")?;
         
-        match self.db.get_cf(cf, hash)? {
+        match self.db.get_cf(cf, hash).map_err(|e| e.to_string())? {
             Some(data) => {
                 let block: Block = bincode::deserialize(&data)?;
                 
@@ -833,7 +833,7 @@ impl Blockchain {
             .ok_or("Missing blocks column family")?;
         
         let height_key = format!("height:{}", height);
-        match self.db.get_cf(cf, height_key.as_bytes())? {
+        match self.db.get_cf(cf, height_key.as_bytes()).map_err(|e| e.to_string())? {
             Some(hash_data) => {
                 let mut hash = [0u8; 32];
                 hash.copy_from_slice(&hash_data);
@@ -848,7 +848,7 @@ impl Blockchain {
         let cf = self.db.cf_handle(CF_TRANSACTIONS)
             .ok_or("Missing transactions column family")?;
         
-        Ok(self.db.get_cf(cf, tx_hash)?.is_some())
+        Ok(self.db.get_cf(cf, tx_hash).map_err(|e| e.to_string())?.is_some())
     }
     
     /// Get balance for an address
@@ -987,7 +987,7 @@ impl Blockchain {
             // Only update database if confirmations changed significantly
             if utxo.confirmations != old_confirmations && utxo.confirmations % 10 == 0 {
                 let serialized = bincode::serialize(utxo)?;
-                db.put_cf(cf, key.as_bytes(), &serialized)?;
+                db.put_cf(cf, key.as_bytes(), &serialized).map_err(|e| e.to_string())?;
             }
         }
         
