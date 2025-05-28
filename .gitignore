@@ -1,0 +1,30 @@
+# Build artifacts
+bitcoin-core/src/bitcoind
+bitcoin-core/src/bitcoin-cli
+bitcoin-core/src/bitcoin-tx
+bitcoin-core/src/*.o
+bitcoin-core/src/*.a
+bitcoin-core/build/
+bitcoin-core/autom4te.cache/
+bitcoin-core/Makefile
+bitcoin-core/src/Makefile
+bitcoin-core/src/config/
+bitcoin-core/config.log
+bitcoin-core/config.status
+
+# Runtime files
+*.log
+debug.log
+.palicoin/
+.bitcoin/
+
+# OS files
+.DS_Store
+Thumbs.db
+*~
+*.swp
+*.swo
+
+# IDE files
+.vscode/
+.idea/
